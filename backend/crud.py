@@ -4,8 +4,9 @@ from sqlalchemy import asc, desc, func, or_, tuple_
 from sqlalchemy.exc import IntegrityError
 from models import AirQuality
 from services.cities import canonical_city_name, city_search_terms
-
-
+import math
+def clean(x):
+    return None if x is None or (isinstance(x, float) and math.isnan(x)) else x
 def _city_filter(city):
     terms = city_search_terms(city)
     return or_(*[AirQuality.city.ilike(f"%{term}%") for term in terms])
@@ -47,17 +48,17 @@ def insert_data(db, records):
 
         seen.add(key)
         objects.append(
-              AirQuality(
+            AirQuality(
                 city=record["city"],
                 time=record["time"],
-                pm25=record.get("pm25"),
-                pm10=record.get("pm10"),
-                co=record.get("co"),
-                no2=record.get("no2"),
-                o3=record.get("o3"),
-                aqi=record.get("aqi"),
+                pm25=clean(record.get("pm25")),
+                pm10=clean(record.get("pm10")),
+                co=clean(record.get("co")),
+                no2=clean(record.get("no2")),
+                o3=clean(record.get("o3")),
+                aqi=clean(record.get("aqi")),
                 station=record["station"],
-)
+            )
         )
 
     if not objects:
