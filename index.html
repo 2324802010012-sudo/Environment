@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hệ thống xếp hạng chất lượng không khí</title>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<style>
+:root {
+    --bg: #eef7f1;
+    --panel: #ffffff;
+    --panel-soft: #f7fbf8;
+    --line: #d6e6da;
+    --text: #173128;
+    --muted: #657a70;
+    --green: #1f8f5f;
+    --green-dark: #126247;
+    --teal: #1d8a99;
+    --amber: #d8911d;
+    --red: #c94c45;
+    --shadow: 0 12px 30px rgba(26, 64, 48, 0.10);
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: "Inter", "Segoe UI", Arial, sans-serif;
+    color: var(--text);
+    background:
+        linear-gradient(180deg, rgba(31,143,95,0.12), transparent 340px),
+        var(--bg);
+}
+
+button, input, select { font: inherit; }
+
+.container {
+    width: min(1240px, calc(100% - 32px));
+    margin: 0 auto;
+    padding: 24px 0 40px;
+}
+
+.topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 18px;
+}
+
+.brand h1 {
+    margin: 0;
+    font-size: clamp(24px, 3vw, 36px);
+    letter-spacing: 0;
+}
+
+.brand p {
+    margin: 8px 0 0;
+    color: var(--muted);
+    max-width: 760px;
+}
+
+.toolbar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.button {
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 11px 14px;
+    color: #fff;
+    background: var(--green);
+    cursor: pointer;
+    font-weight: 700;
+}
+
+.button.secondary {
+    color: var(--green-dark);
+    background: #e4f3e9;
+    border-color: #b7dbc4;
+}
+
+.button:hover { filter: brightness(0.97); }
+
+.layout {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 16px;
+}
+
+.panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 18px;
+    box-shadow: var(--shadow);
+}
+
+.panel h2 {
+    margin: 0 0 14px;
+    font-size: 18px;
+}
+
+.panel h3 {
+    margin: 0 0 12px;
+    font-size: 15px;
+}
+
+.span-12 { grid-column: span 12; }
+.span-8 { grid-column: span 8; }
+.span-7 { grid-column: span 7; }
+.span-5 { grid-column: span 5; }
+.span-4 { grid-column: span 4; }
+.span-3 { grid-column: span 3; }
+
+.form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 10px;
+    align-items: end;
+}
+
+.field label {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.field input {
+    width: 100%;
+    height: 42px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0 12px;
+    background: #fff;
+    color: var(--text);
+}
+
+.search-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+.kpi {
+    min-height: 132px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+
+.kpi .value {
+    display: block;
+    font-size: 34px;
+    font-weight: 800;
+    color: var(--green-dark);
+    line-height: 1.1;
+}
+
+.kpi p {
+    margin: 8px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.notice {
+    margin-top: 12px;
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--panel-soft);
+    border: 1px solid var(--line);
+    color: var(--muted);
+}
+
+.compare-summary {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.city-box {
+    background: var(--panel-soft);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px;
+}
+
+.city-box strong {
+    display: block;
+    font-size: 18px;
+    margin-bottom: 8px;
+}
+
+.metric-list {
+    display: grid;
+    gap: 5px;
+    color: var(--muted);
+    font-size: 14px;
+}
+
+.winner {
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: #e4f3e9;
+    color: var(--green-dark);
+    font-weight: 700;
+}
+
+.table-wrap { overflow-x: auto; }
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th, td {
+    padding: 10px 8px;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+    white-space: nowrap;
+}
+
+th {
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0;
+}
+
+td { font-size: 14px; }
+
+.badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 26px;
+    padding: 4px 9px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.good, .low { color: #11633e; background: #dff3e8; }
+.moderate, .medium { color: #8b5b00; background: #fff1d6; }
+.bad, .high { color: #983731; background: #fde4e1; }
+
+.chart-box {
+    height: 360px;
+    position: relative;
+}
+
+.small-chart {
+    height: 300px;
+    position: relative;
+}
+
+#map {
+    height: 390px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+}
+
+.two-cols {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+}
+
+@media (max-width: 980px) {
+    .span-8, .span-7, .span-5, .span-4, .span-3 { grid-column: span 12; }
+    .form-grid, .compare-summary, .two-cols { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 720px) {
+    .topbar, .toolbar { align-items: stretch; flex-direction: column; }
+    .search-row { grid-template-columns: 1fr; }
+    .button { width: 100%; }
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+    <header class="topbar">
+        <div class="brand">
+            <h1>Hệ thống tìm kiếm và xếp hạng chất lượng không khí</h1>
+            <p>Thu thập PM2.5, PM10, CO, NO2, O3 theo thời gian; hỗ trợ tìm kiếm, so sánh, xếp hạng và phân nhóm mức độ ô nhiễm tại các thành phố.</p>
+        </div>
+        <div class="toolbar">
+            <button class="button secondary" onclick="crawlData(event)">Thu thập mới</button>
+            <button class="button" onclick="loadAll()">Làm mới</button>
+        </div>
+    </header>
+
+    <main class="layout">
+        <section class="panel span-12">
+            <h2>Tìm kiếm và so sánh</h2>
+            <div class="two-cols">
+                <div>
+                    <div class="search-row">
+                        <div class="field">
+                            <label for="searchCity">Tìm thành phố</label>
+                            <input id="searchCity" list="cityList" value="Hà Nội" placeholder="Ví dụ: Hà Nội, Đà Nẵng, TP. Hồ Chí Minh">
+                            <datalist id="cityList"></datalist>
+                        </div>
+                        <button class="button" onclick="searchCity()">Tìm kiếm</button>
+                    </div>
+                    <div id="searchResult" class="table-wrap notice">Nhập tên thành phố để xem lịch sử các chỉ số gần nhất.</div>
+                </div>
+                <div>
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="compareCity1">Thành phố 1</label>
+                            <input id="compareCity1" list="cityList" value="Hà Nội">
+                        </div>
+                        <div class="field">
+                            <label for="compareCity2">Thành phố 2</label>
+                            <input id="compareCity2" list="cityList" value="Cần Thơ">
+                        </div>
+                        <button class="button" onclick="compareCities()">So sánh</button>
+                    </div>
+                    <div id="compareResult" class="notice">So sánh AQI trung bình và từng chất ô nhiễm giữa hai thành phố.</div>
+                </div>
+            </div>
+        </section>
+   
+        <section class="panel span-3 kpi">
+            <h3>AQI cao nhất</h3>
+            <span class="value" id="currentAQI">--</span>
+            <p id="currentCity">Đang tải dữ liệu xếp hạng.</p>
+        </section>
+        <section class="panel span-3 kpi">
+            <h3>Dự đoán ML</h3>
+            <span class="value" id="predictedAQI">--</span>
+            <p>Dự đoán từ PM2.5, PM10, CO, NO2, O3 mới nhất.</p>
+        </section>
+        <section class="panel span-3 kpi">
+            <h3>Số thành phố</h3>
+            <span class="value" id="summaryCount">--</span>
+            <p>Dựa trên bản ghi mới nhất theo từng thành phố.</p>
+        </section>
+        <section class="panel span-3 kpi">
+            <h3>Không khí tốt nhất</h3>
+            <span class="value" id="bestCity">--</span>
+            <p>Thành phố có AQI thấp nhất trong dữ liệu hiện tại.</p>
+        </section>
+
+        <section class="panel span-8">
+            <h2>Diễn biến AQI theo thời gian</h2>
+            <div class="chart-box"><canvas id="chart"></canvas></div>
+        </section>
+
+        <section class="panel span-4">
+            <h2>Xếp hạng ô nhiễm</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Thành phố</th><th>AQI</th><th>Mức</th></tr></thead>
+                    <tbody id="ranking"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel span-7">
+            <h2>Kết quả so sánh chi tiết</h2>
+            <div class="small-chart"><canvas id="compareChart"></canvas></div>
+        </section>
+
+        <section class="panel span-5">
+            <h2>Tóm tắt hệ thống</h2>
+            <div id="summaryText" class="metric-list">Đang tải dữ liệu tóm tắt...</div>
+        </section>
+
+        <section class="panel span-5">
+            <h2>Phân nhóm ô nhiễm bằng KMeans</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Thành phố</th><th>Nhóm</th><th>AQI</th><th>PM2.5</th></tr></thead>
+                    <tbody id="clusterTable"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel span-7">
+            <h2>Bản đồ AQI</h2>
+            <div id="map"></div>
+        </section>
+    </main>
+</div>
+
+<script>
+const API_BASE = "http://127.0.0.1:8000";
+let cities = [];
+
+
+
+let chart = null;
+let compareChart = null;
+let markers = [];
+const map = L.map("map").setView([16, 108], 5);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "&copy; OpenStreetMap"
+}).addTo(map);
+
+function levelClass(level, aqi) {
+    if (level === "low" || level === "Tốt" || aqi <= 50) return "good";
+    if (level === "medium" || level === "Trung bình" || aqi <= 100) return "moderate";
+    return "bad";
+}
+
+function levelText(level) {
+    return { low: "Thấp", medium: "Trung bình", high: "Cao" }[level] || level || "--";
+}
+
+function colorByAqi(aqi) {
+    if (aqi <= 50) return "#1f8f5f";
+    if (aqi <= 100) return "#d8911d";
+    return "#c94c45";
+}
+
+function metricRows(city) {
+    return `
+        <span>AQI: <b>${city.aqi}</b> (${city.level})</span>
+        <span>PM2.5: <b>${city.pm25}</b> µg/m³</span>
+        <span>PM10: <b>${city.pm10}</b> µg/m³</span>
+        <span>CO: <b>${city.co}</b></span>
+        <span>NO2: <b>${city.no2}</b></span>
+        <span>O3: <b>${city.o3}</b></span>
+    `;
+}
+
+async function getJson(path) {
+    const res = await fetch(`${API_BASE}${path}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+}
+
+async function crawlData(evt) {
+    const btnText = evt?.target?.innerText;
+    if (evt?.target) evt.target.innerText = "Đang thu thập...";
+    try {
+        await getJson("/crawl");
+        await loadAll();
+    } catch (err) {
+        alert("Không thể thu thập dữ liệu. Hãy kiểm tra backend hoặc kết nối API.");
+    } finally {
+        if (evt?.target) evt.target.innerText = btnText || "Thu thập mới";
+    }
+}
+
+async function loadCurrent() {
+    const data = await getJson("/ranking?limit=10&order=desc");
+    if (!data.length) return;
+    document.getElementById("currentAQI").innerText = data[0].aqi;
+    document.getElementById("currentCity").innerText = `${data[0].city} - ${data[0].level}`;
+    loadPrediction(data[0].city);
+}
+
+async function loadPrediction(city = "Hà Nội") {
+    try {
+        const data = await getJson(`/predict?city=${encodeURIComponent(city)}`);
+        document.getElementById("predictedAQI").innerText = data.predicted_aqi ?? "--";
+    } catch {
+        document.getElementById("predictedAQI").innerText = "--";
+    }
+}
+
+async function loadChart() {
+    const data = await getJson("/chart_multi");
+    const keys = Object.keys(data).slice(0, 5);
+    const labels = keys.length ? data[keys[0]].labels : [];
+    const colors = ["#1f8f5f", "#1d8a99", "#d8911d", "#8067b7", "#c94c45", "#4c7c59"];
+
+    if (chart) chart.destroy();
+    chart = new Chart(document.getElementById("chart"), {
+        type: "line",
+        data: {
+            labels,
+            datasets: keys.map((city, index) => ({
+                label: city,
+                data: data[city].aqi.map(v => v ?? 0),
+                borderColor: colors[index % colors.length],
+                backgroundColor: colors[index % colors.length],
+                borderWidth: 2,
+                tension: 0.25,
+                spanGaps: true
+            }))
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { position: "bottom" } },
+            scales: { y: { beginAtZero: true, grid: { color: "#e7f0ea" } }, x: { grid: { display: false } } }
+        }
+    });
+}
+let coords = {};
+
+async function loadCities() {
+    cities = await getJson("/cities");
+
+    coords = {};
+    cities.forEach(c => {
+        coords[c.name] = c.coords;
+    });
+}
+async function loadRanking() {
+    const data = await getJson("/ranking?limit=10&order=desc");
+    document.getElementById("ranking").innerHTML = data.map((r, index) => `
+        <tr>
+            <td>${index + 1}. ${r.city}</td>
+            <td><b style="color:${colorByAqi(r.aqi)}">${r.aqi}</b></td>
+            <td><span class="badge ${levelClass(r.level, r.aqi)}">${r.level}</span></td>
+        </tr>
+    `).join("");
+}
+
+async function loadMap() {
+    markers.forEach(marker => map.removeLayer(marker));
+    markers = [];
+
+    const data = await getJson("/map");
+
+    data.forEach(r => {
+
+        let color = "#1f8f5f";
+
+        if (r.aqi > 150) color = "#c94c45";
+        else if (r.aqi > 100) color = "#d8911d";
+        else if (r.aqi > 50) color = "#e6c229";
+
+        const marker = L.circleMarker([r.lat, r.lng], {
+            color: color,
+            fillColor: color,
+            fillOpacity: 0.8,
+            radius: 7
+        })
+        .addTo(map)
+        .bindPopup(`
+            <b>${r.city}</b><br>
+            AQI: ${r.aqi || "Không có dữ liệu"}<br>
+            Mức: ${r.level}
+        `);
+
+        markers.push(marker);
+    });
+}
+async function loadSummary() {
+    const data = await getJson("/summary");
+    document.getElementById("summaryCount").innerText = data.count_city || 0;
+    document.getElementById("bestCity").innerText = data.best_places?.[0]?.city || "--";
+    document.getElementById("summaryText").innerHTML = `
+        <span>Số thành phố đang theo dõi: <b>${data.count_city || 0}</b></span>
+        <span>AQI trung bình: <b>${data.avg_aqi || 0}</b></span>
+        <span>PM2.5 trung bình: <b>${data.avg_pm25 || 0}</b> µg/m³</span>
+        <span>PM10 trung bình: <b>${data.avg_pm10 || 0}</b> µg/m³</span>
+        <span>Không khí tốt: <b>${(data.best_places || []).map(x => `${x.city} (${x.aqi})`).join(", ") || "--"}</b></span>
+        <span>Ô nhiễm cao: <b>${(data.worst_places || []).map(x => `${x.city} (${x.aqi})`).join(", ") || "--"}</b></span>
+    `;
+}
+
+async function loadCluster() {
+    const data = await getJson("/cluster");
+    const table = document.getElementById("clusterTable");
+    if (!data.clusters) {
+        table.innerHTML = `<tr><td colspan="4">Chưa đủ dữ liệu để phân nhóm.</td></tr>`;
+        return;
+    }
+    table.innerHTML = data.clusters.map(c => `
+        <tr>
+            <td>${c.city}</td>
+            <td><span class="badge ${levelClass(c.level, c.aqi)}">${levelText(c.level)}</span></td>
+            <td>${c.aqi}</td>
+            <td>${c.pm25}</td>
+        </tr>
+    `).join("");
+}
+
+async function searchCity() {
+    const city = document.getElementById("searchCity").value.trim();
+    const box = document.getElementById("searchResult");
+    if (!city) {
+        box.innerText = "Vui lòng nhập tên thành phố.";
+        return;
+    }
+
+    const data = await getJson(`/city?city=${encodeURIComponent(city)}`);
+    if (!data.length) {
+        box.innerText = "Không tìm thấy dữ liệu cho thành phố này.";
+        return;
+    }
+
+    box.classList.remove("notice");
+    box.innerHTML = `
+        <table>
+            <thead><tr><th>Thời gian</th><th>AQI</th><th>Mức</th><th>PM2.5</th><th>PM10</th><th>CO</th><th>NO2</th><th>O3</th></tr></thead>
+            <tbody>
+                ${data.slice(0, 8).map(r => `
+                    <tr>
+                        <td>${r.time}</td>
+                        <td><b style="color:${colorByAqi(r.aqi)}">${r.aqi}</b></td>
+                        <td><span class="badge ${levelClass(r.level, r.aqi)}">${r.level}</span></td>
+                        <td>${r.pm25}</td><td>${r.pm10}</td><td>${r.co}</td><td>${r.no2}</td><td>${r.o3}</td>
+                    </tr>
+                `).join("")}
+            </tbody>
+        </table>
+    `;
+}
+
+async function compareCities() {
+    const city1 = document.getElementById("compareCity1").value.trim();
+    const city2 = document.getElementById("compareCity2").value.trim();
+    const box = document.getElementById("compareResult");
+    if (!city1 || !city2) {
+        box.innerText = "Nhập đủ hai thành phố để so sánh.";
+        return;
+    }
+
+    try {
+        const data = await getJson(`/compare?city1=${encodeURIComponent(city1)}&city2=${encodeURIComponent(city2)}`);
+        box.classList.remove("notice");
+        box.innerHTML = `
+            <p class="winner">Thành phố có chất lượng không khí tốt hơn: ${data.better_city}. Chênh lệch AQI: ${data.difference.aqi}</p>
+            <div class="compare-summary">
+                <div class="city-box"><strong>${data.city1.city}</strong><div class="metric-list">${metricRows(data.city1)}</div></div>
+                <div class="city-box"><strong>${data.city2.city}</strong><div class="metric-list">${metricRows(data.city2)}</div></div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Chỉ số</th><th>${data.city1.city}</th><th>${data.city2.city}</th><th>Chênh lệch</th></tr></thead>
+                    <tbody>
+                        ${["aqi", "pm25", "pm10", "co", "no2", "o3"].map(key => `
+                            <tr><td>${key.toUpperCase()}</td><td>${data.city1[key]}</td><td>${data.city2[key]}</td><td>${data.difference[key]}</td></tr>
+                        `).join("")}
+                    </tbody>
+                </table>
+            </div>
+        `;
+        drawCompareChart(data);
+    } catch {
+        box.innerText = "Không tìm thấy dữ liệu so sánh. Hãy thử tên Việt hóa hoặc tên không dấu.";
+    }
+}
+
+function drawCompareChart(data) {
+    const labels = ["AQI", "PM2.5", "PM10", "CO", "NO2", "O3"];
+    if (compareChart) compareChart.destroy();
+    compareChart = new Chart(document.getElementById("compareChart"), {
+        type: "bar",
+        data: {
+            labels,
+            datasets: [
+                {
+                    label: data.city1.city,
+                    data: [data.city1.aqi, data.city1.pm25, data.city1.pm10, data.city1.co, data.city1.no2, data.city1.o3],
+                    backgroundColor: "rgba(31,143,95,0.75)"
+                },
+                {
+                    label: data.city2.city,
+                    data: [data.city2.aqi, data.city2.pm25, data.city2.pm10, data.city2.co, data.city2.no2, data.city2.o3],
+                    backgroundColor: "rgba(29,138,153,0.75)"
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { position: "bottom" } },
+            scales: { y: { beginAtZero: true, grid: { color: "#e7f0ea" } }, x: { grid: { display: false } } }
+        }
+    });
+}
+
+async function loadAll() {
+    try {
+        await Promise.all([loadCurrent(), loadChart(), loadRanking(), loadMap(), loadSummary(), loadCluster()]);
+    } catch (err) {
+        console.error(err);
+    }
+}
+
+
+// render dropdown
+function renderCityList() {
+    const list = document.getElementById("cityList");
+
+    list.innerHTML = cities.map(c =>
+        `<option value="${c.name}"></option>`
+    ).join("");
+}
+async function init() {
+    await loadCities();      // lấy danh sách city
+    renderCityList();        // render dropdown
+    await loadAll();         // load dashboard
+}
+
+init();
+setInterval(loadAll, 30000);
+</script>
+</body>
+</html>
