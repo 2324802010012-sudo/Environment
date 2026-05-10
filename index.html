@@ -71,6 +71,13 @@ button, input, select { font: inherit; }
     flex-wrap: wrap;
 }
 
+.crawl-status {
+    flex-basis: 100%;
+    color: var(--muted);
+    font-size: 13px;
+    min-height: 18px;
+}
+
 .button {
     border: 1px solid transparent;
     border-radius: 8px;
@@ -295,11 +302,12 @@ td { font-size: 14px; }
     <header class="topbar">
         <div class="brand">
             <h1>Hệ thống tìm kiếm và xếp hạng chất lượng không khí</h1>
-            <p>Thu thập PM2.5, PM10, CO, NO2, O3 theo thời gian; hỗ trợ tìm kiếm, so sánh, xếp hạng và phân nhóm mức độ ô nhiễm tại các thành phố.</p>
+            <p>Thu thập PM2.5, PM10, CO, NO2, O3 theo thời gian tại 93 thành phố/khu vực Việt Nam; hỗ trợ tìm kiếm, so sánh, xếp hạng và phân nhóm mức độ ô nhiễm.</p>
         </div>
         <div class="toolbar">
             <button class="button secondary" onclick="crawlData(event)">Thu thập mới</button>
             <button class="button" onclick="loadAll()">Làm mới</button>
+            <div id="crawlStatus" class="crawl-status"></div>
         </div>
     </header>
 
@@ -441,20 +449,45 @@ function metricRows(city) {
 
 async function getJson(path) {
     const res = await fetch(`${API_BASE}${path}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
+    const text = await res.text();
+    let data = {};
+    try {
+        data = text ? JSON.parse(text) : {};
+    } catch {
+        data = { error: text || `HTTP ${res.status}` };
+    }
+    if (!res.ok) {
+        throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+    }
+    return data;
 }
 
 async function crawlData(evt) {
     const btnText = evt?.target?.innerText;
-    if (evt?.target) evt.target.innerText = "Đang thu thập...";
+    const status = document.getElementById("crawlStatus");
+    if (evt?.target) {
+        evt.target.innerText = "Đang thu thập 1000+ mẫu...";
+        evt.target.disabled = true;
+    }
+    if (status) status.innerText = "Đang crawl dữ liệu từ Internet, bước này có thể mất vài phút tùy tốc độ API.";
     try {
-        await getJson("/crawl");
+        const result = await getJson("/crawl?target=1000&max_rounds=12&max_terms=5&max_stations=15");
+        if (result.error) {
+            throw new Error(result.error);
+        }
+        if (status) {
+            status.innerText = `Hoàn tất: lấy ${result.raw_count || 0} mẫu, sạch ${result.clean_count || 0}, lưu mới ${result.inserted_count || 0}.`;
+        }
         await loadAll();
     } catch (err) {
-        alert("Không thể thu thập dữ liệu. Hãy kiểm tra backend hoặc kết nối API.");
+        const message = err?.message || "Không rõ lỗi";
+        if (status) status.innerText = `Crawl chưa thành công: ${message}`;
+        alert(`Không thể thu thập dữ liệu: ${message}`);
     } finally {
-        if (evt?.target) evt.target.innerText = btnText || "Thu thập mới";
+        if (evt?.target) {
+            evt.target.innerText = btnText || "Thu thập mới";
+            evt.target.disabled = false;
+        }
     }
 }
 

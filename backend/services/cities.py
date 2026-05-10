@@ -437,6 +437,10 @@ CITY_PROFILES += [
     {"slug": "tay-ninh-city", "name": "TP. Tây Ninh", "aliases": ["tay ninh"], "coords": [11.31,106.10]},
 
 ]
+
+# Gioi han danh sach dung cho crawl/map/search theo yeu cau: 93 thanh pho/khu vuc tai Viet Nam.
+CITY_PROFILES = CITY_PROFILES[:93]
+
 def strip_accents(value: str) -> str:
     value = unicodedata.normalize("NFD", value or "")
     value = "".join(ch for ch in value if unicodedata.category(ch) != "Mn")

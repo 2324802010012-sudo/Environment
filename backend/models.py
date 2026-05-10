@@ -16,7 +16,8 @@ class AirQuality(Base):
     no2 = Column(Float)
     o3 = Column(Float)
     aqi = Column(Float)
+    station = Column(String(200), nullable=True)
 
     __table_args__ = (
-        UniqueConstraint('city', 'time', name='unique_city_time'),
-    )
+    UniqueConstraint('city', 'time', 'station', name='unique_record'),
+)
