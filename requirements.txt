@@ -3,6 +3,5 @@ uvicorn
 sqlalchemy
 pymysql
 requests
-beautifulsoup4
 pandas
 scikit-learn

@@ -438,8 +438,29 @@ CITY_PROFILES += [
 
 ]
 
-# Gioi han danh sach dung cho crawl/map/search theo yeu cau: 93 thanh pho/khu vuc tai Viet Nam.
-CITY_PROFILES = CITY_PROFILES[:93]
+# Giu dung 93 thanh pho/khu vuc tai Viet Nam, sau do bo sung mot so thanh pho nuoc ngoai.
+VIETNAM_CITY_COUNT = 93
+CITY_PROFILES = CITY_PROFILES[:VIETNAM_CITY_COUNT]
+
+FOREIGN_CITY_PROFILES = [
+    {"slug": "bangkok", "name": "Bangkok", "country": "Thailand", "aliases": ["bangkok", "Bangkok"], "coords": [13.7563, 100.5018]},
+    {"slug": "singapore", "name": "Singapore", "country": "Singapore", "aliases": ["singapore", "Singapore"], "coords": [1.3521, 103.8198]},
+    {"slug": "kuala-lumpur", "name": "Kuala Lumpur", "country": "Malaysia", "aliases": ["kuala lumpur", "Kuala Lumpur"], "coords": [3.1390, 101.6869]},
+    {"slug": "jakarta", "name": "Jakarta", "country": "Indonesia", "aliases": ["jakarta", "Jakarta"], "coords": [-6.2088, 106.8456]},
+    {"slug": "manila", "name": "Manila", "country": "Philippines", "aliases": ["manila", "Manila"], "coords": [14.5995, 120.9842]},
+    {"slug": "phnom-penh", "name": "Phnom Penh", "country": "Cambodia", "aliases": ["phnom penh", "Phnom Penh"], "coords": [11.5564, 104.9282]},
+    {"slug": "vientiane", "name": "Vientiane", "country": "Laos", "aliases": ["vientiane", "Vientiane"], "coords": [17.9757, 102.6331]},
+    {"slug": "yangon", "name": "Yangon", "country": "Myanmar", "aliases": ["yangon", "Yangon"], "coords": [16.8409, 96.1735]},
+    {"slug": "beijing", "name": "Beijing", "country": "China", "aliases": ["beijing", "Beijing"], "coords": [39.9042, 116.4074]},
+    {"slug": "shanghai", "name": "Shanghai", "country": "China", "aliases": ["shanghai", "Shanghai"], "coords": [31.2304, 121.4737]},
+    {"slug": "hong-kong", "name": "Hong Kong", "country": "Hong Kong", "aliases": ["hong kong", "Hong Kong"], "coords": [22.3193, 114.1694]},
+    {"slug": "tokyo", "name": "Tokyo", "country": "Japan", "aliases": ["tokyo", "Tokyo"], "coords": [35.6762, 139.6503]},
+    {"slug": "seoul", "name": "Seoul", "country": "South Korea", "aliases": ["seoul", "Seoul"], "coords": [37.5665, 126.9780]},
+    {"slug": "taipei", "name": "Taipei", "country": "Taiwan", "aliases": ["taipei", "Taipei"], "coords": [25.0330, 121.5654]},
+    {"slug": "new-delhi", "name": "New Delhi", "country": "India", "aliases": ["new delhi", "New Delhi", "delhi"], "coords": [28.6139, 77.2090]},
+]
+
+CITY_PROFILES += FOREIGN_CITY_PROFILES
 
 def strip_accents(value: str) -> str:
     value = unicodedata.normalize("NFD", value or "")
@@ -455,6 +476,14 @@ def canonical_city_name(value: str) -> str:
         return MOJIBAKE_NAMES[value]
 
     normalized_value = strip_accents(value)
+
+    # First prefer exact matches so city-level entries such as
+    # "TP. Thai Nguyen" are not collapsed into the broader "Thai Nguyen".
+    for profile in CITY_PROFILES:
+        names = [profile["name"], profile["slug"], *profile["aliases"]]
+        if any(strip_accents(name) == normalized_value for name in names):
+            return profile["name"]
+
     for profile in CITY_PROFILES:
         names = [profile["name"], profile["slug"], *profile["aliases"]]
         if any(strip_accents(name) in normalized_value for name in names):

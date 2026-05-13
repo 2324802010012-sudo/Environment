@@ -1,7 +1,7 @@
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 from sqlalchemy import text
-from services.cities import city_search_terms
+from .cities import city_search_terms
 
 def predict_aqi(db, city: str = None):
 
@@ -9,7 +9,7 @@ def predict_aqi(db, city: str = None):
     # LOAD DATA
     # =========================
     query = text("""
-        SELECT pm25, pm10, co, no2, o3, aqi
+        SELECT pm25, pm10, co, no2, so2, o3, aqi
         FROM air_quality
         WHERE aqi IS NOT NULL AND aqi > 0
     """)
@@ -19,14 +19,14 @@ def predict_aqi(db, city: str = None):
     if len(data) < 20:
         return {"predicted_aqi": 0, "message": "Not enough data"}
 
-    df = pd.DataFrame(data, columns=['pm25','pm10','co','no2','o3','aqi'])
+    df = pd.DataFrame(data, columns=['pm25','pm10','co','no2','so2','o3','aqi'])
 
     # =========================
     # CLEAN DATA 🔥
     # =========================
     df = df.fillna(0)
 
-    X = df[['pm25','pm10','co','no2','o3']]
+    X = df[['pm25','pm10','co','no2','so2','o3']]
     y = df['aqi']
 
     # =========================
@@ -47,7 +47,7 @@ def predict_aqi(db, city: str = None):
         ])
 
         region_query = text(f"""
-            SELECT pm25, pm10, co, no2, o3
+            SELECT pm25, pm10, co, no2, so2, o3
             FROM air_quality
             WHERE {clauses}
             ORDER BY time DESC
@@ -65,7 +65,8 @@ def predict_aqi(db, city: str = None):
             "pm10": float(last[1] or 0),
             "co": float(last[2] or 0),
             "no2": float(last[3] or 0),
-            "o3": float(last[4] or 0),
+            "so2": float(last[4] or 0),
+            "o3": float(last[5] or 0),
         }
 
     else:

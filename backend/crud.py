@@ -1,12 +1,20 @@
 from types import SimpleNamespace
-
 from sqlalchemy import asc, desc, func, or_, tuple_
 from sqlalchemy.exc import IntegrityError
-from models import AirQuality
-from services.cities import canonical_city_name, city_search_terms
+
+try:
+    from .models import AirQuality
+    from .services.cities import canonical_city_name, city_search_terms
+except ImportError:
+    from models import AirQuality
+    from services.cities import canonical_city_name, city_search_terms
 import math
+
+
 def clean(x):
     return None if x is None or (isinstance(x, float) and math.isnan(x)) else x
+
+
 def _city_filter(city):
     terms = city_search_terms(city)
     return or_(*[AirQuality.city.ilike(f"%{term}%") for term in terms])
@@ -22,7 +30,8 @@ def insert_data(db, records):
 
         city = canonical_city_name(record.get("city", ""))
         station = record.get("station") or "unknown"
-        valid_records.append({**record, "city": city, "station": station})
+        country = record.get("country", "Vietnam")
+        valid_records.append({**record, "city": city, "station": station, "country": country})
 
     if not valid_records:
         print("[INSERTED] 0 records")
@@ -50,11 +59,13 @@ def insert_data(db, records):
         objects.append(
             AirQuality(
                 city=record["city"],
+                country=record["country"],
                 time=record["time"],
                 pm25=clean(record.get("pm25")),
                 pm10=clean(record.get("pm10")),
                 co=clean(record.get("co")),
                 no2=clean(record.get("no2")),
+                so2=clean(record.get("so2")),
                 o3=clean(record.get("o3")),
                 aqi=clean(record.get("aqi")),
                 station=record["station"],
@@ -110,12 +121,12 @@ def get_unique_latest(db, limit=10, sort_desc=True):
 
     query = db.query(AirQuality).join(
         subquery,
-        (AirQuality.city == subquery.c.city) & (AirQuality.time == subquery.c.latest_time),
+        (AirQuality.city == subquery.c.city) &
+        (AirQuality.time == subquery.c.latest_time),
     )
 
     query = query.order_by(desc(AirQuality.aqi) if sort_desc else asc(AirQuality.aqi))
     return query.limit(limit).all()
-
 
 def search_city_records(db, city, limit=50):
     return (
@@ -138,6 +149,7 @@ def get_city_aggregate(db, city):
             func.avg(AirQuality.pm10).label("pm10"),
             func.avg(AirQuality.co).label("co"),
             func.avg(AirQuality.no2).label("no2"),
+            func.avg(AirQuality.so2).label("so2"),
             func.avg(AirQuality.o3).label("o3"),
             func.avg(AirQuality.aqi).label("aqi"),
         )
@@ -155,6 +167,7 @@ def get_city_aggregate(db, city):
             pm10=float(row.pm10 or 0),
             co=float(row.co or 0),
             no2=float(row.no2 or 0),
+            so2=float(row.so2 or 0),
             o3=float(row.o3 or 0),
             aqi=float(row.aqi or 0),
         )
@@ -169,6 +182,7 @@ def get_all_city_averages(db):
             func.avg(AirQuality.pm10).label("pm10"),
             func.avg(AirQuality.co).label("co"),
             func.avg(AirQuality.no2).label("no2"),
+            func.avg(AirQuality.so2).label("so2"),
             func.avg(AirQuality.o3).label("o3"),
             func.avg(AirQuality.aqi).label("aqi"),
         )

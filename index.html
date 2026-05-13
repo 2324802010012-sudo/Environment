@@ -302,7 +302,7 @@ td { font-size: 14px; }
     <header class="topbar">
         <div class="brand">
             <h1>Hệ thống tìm kiếm và xếp hạng chất lượng không khí</h1>
-            <p>Thu thập PM2.5, PM10, CO, NO2, O3 theo thời gian tại 93 thành phố/khu vực Việt Nam; hỗ trợ tìm kiếm, so sánh, xếp hạng và phân nhóm mức độ ô nhiễm.</p>
+            <p>Thu thập PM2.5, PM10, CO, NO2, SO2, O3 theo thời gian tại 93 địa điểm Việt Nam và 15 thành phố nước ngoài; hỗ trợ tìm kiếm, so sánh, xếp hạng và phân nhóm mức độ ô nhiễm.</p>
         </div>
         <div class="toolbar">
             <button class="button secondary" onclick="crawlData(event)">Thu thập mới</button>
@@ -393,7 +393,7 @@ td { font-size: 14px; }
             <h2>Phân nhóm ô nhiễm bằng KMeans</h2>
             <div class="table-wrap">
                 <table>
-                    <thead><tr><th>Thành phố</th><th>Nhóm</th><th>AQI</th><th>PM2.5</th></tr></thead>
+                    <thead><tr><th>Thành phố</th><th>Nhóm</th><th>AQI</th><th>PM2.5</th><th>SO2</th></tr></thead>
                     <tbody id="clusterTable"></tbody>
                 </table>
             </div>
@@ -415,7 +415,7 @@ let cities = [];
 let chart = null;
 let compareChart = null;
 let markers = [];
-const map = L.map("map").setView([16, 108], 5);
+const map = L.map("map").setView([18, 105], 4);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "&copy; OpenStreetMap"
 }).addTo(map);
@@ -436,14 +436,20 @@ function colorByAqi(aqi) {
     return "#c94c45";
 }
 
+function fmt(value, suffix = "") {
+    return value === null || value === undefined || Number.isNaN(Number(value)) ? "--" : `${value}${suffix}`;
+}
+
 function metricRows(city) {
     return `
         <span>AQI: <b>${city.aqi}</b> (${city.level})</span>
-        <span>PM2.5: <b>${city.pm25}</b> µg/m³</span>
-        <span>PM10: <b>${city.pm10}</b> µg/m³</span>
-        <span>CO: <b>${city.co}</b></span>
-        <span>NO2: <b>${city.no2}</b></span>
-        <span>O3: <b>${city.o3}</b></span>
+        <span>PM2.5: <b>${fmt(city.pm25, " µg/m³")}</b></span>
+        <span>PM10: <b>${fmt(city.pm10, " µg/m³")}</b></span>
+        <span>CO: <b>${fmt(city.co)}</b></span>
+        <span>NO2: <b>${fmt(city.no2)}</b></span>
+        <span>SO2: <b>${fmt(city.so2)}</b></span>
+        <span>O3: <b>${fmt(city.o3)}</b></span>
+        <span>Dữ liệu: <b>${city.quality === "complete" ? "Đủ chỉ số" : city.quality === "partial" ? "Thiếu một số chỉ số" : "Chỉ có AQI"}</b></span>
     `;
 }
 
@@ -466,12 +472,12 @@ async function crawlData(evt) {
     const btnText = evt?.target?.innerText;
     const status = document.getElementById("crawlStatus");
     if (evt?.target) {
-        evt.target.innerText = "Đang thu thập 1000+ mẫu...";
+        evt.target.innerText = "Đang thu thập 1500+ mẫu...";
         evt.target.disabled = true;
     }
     if (status) status.innerText = "Đang crawl dữ liệu từ Internet, bước này có thể mất vài phút tùy tốc độ API.";
     try {
-        const result = await getJson("/crawl?target=1000&max_rounds=12&max_terms=5&max_stations=15");
+        const result = await getJson("/crawl?target=1500");
         if (result.error) {
             throw new Error(result.error);
         }
@@ -521,7 +527,7 @@ async function loadChart() {
             labels,
             datasets: keys.map((city, index) => ({
                 label: city,
-                data: data[city].aqi.map(v => v ?? 0),
+                data: data[city].aqi,
                 borderColor: colors[index % colors.length],
                 backgroundColor: colors[index % colors.length],
                 borderWidth: 2,
@@ -590,13 +596,15 @@ async function loadMap() {
 }
 async function loadSummary() {
     const data = await getJson("/summary");
-    document.getElementById("summaryCount").innerText = data.count_city || 0;
+    document.getElementById("summaryCount").innerText = data.tracked_city_count || data.count_city || 0;
     document.getElementById("bestCity").innerText = data.best_places?.[0]?.city || "--";
     document.getElementById("summaryText").innerHTML = `
-        <span>Số thành phố đang theo dõi: <b>${data.count_city || 0}</b></span>
+        <span>Số thành phố/khu vực theo dõi: <b>${data.tracked_city_count || 0}</b></span>
+        <span>Số thành phố/khu vực đã có dữ liệu: <b>${data.count_city || 0}</b></span>
         <span>AQI trung bình: <b>${data.avg_aqi || 0}</b></span>
-        <span>PM2.5 trung bình: <b>${data.avg_pm25 || 0}</b> µg/m³</span>
-        <span>PM10 trung bình: <b>${data.avg_pm10 || 0}</b> µg/m³</span>
+        <span>PM2.5 trung bình: <b>${fmt(data.avg_pm25, " µg/m³")}</b></span>
+        <span>PM10 trung bình: <b>${fmt(data.avg_pm10, " µg/m³")}</b></span>
+        <span>SO2 trung bình: <b>${fmt(data.avg_so2)}</b></span>
         <span>Không khí tốt: <b>${(data.best_places || []).map(x => `${x.city} (${x.aqi})`).join(", ") || "--"}</b></span>
         <span>Ô nhiễm cao: <b>${(data.worst_places || []).map(x => `${x.city} (${x.aqi})`).join(", ") || "--"}</b></span>
     `;
@@ -606,7 +614,7 @@ async function loadCluster() {
     const data = await getJson("/cluster");
     const table = document.getElementById("clusterTable");
     if (!data.clusters) {
-        table.innerHTML = `<tr><td colspan="4">Chưa đủ dữ liệu để phân nhóm.</td></tr>`;
+        table.innerHTML = `<tr><td colspan="5">Chưa đủ dữ liệu để phân nhóm.</td></tr>`;
         return;
     }
     table.innerHTML = data.clusters.map(c => `
@@ -615,6 +623,7 @@ async function loadCluster() {
             <td><span class="badge ${levelClass(c.level, c.aqi)}">${levelText(c.level)}</span></td>
             <td>${c.aqi}</td>
             <td>${c.pm25}</td>
+            <td>${c.so2}</td>
         </tr>
     `).join("");
 }
@@ -636,14 +645,14 @@ async function searchCity() {
     box.classList.remove("notice");
     box.innerHTML = `
         <table>
-            <thead><tr><th>Thời gian</th><th>AQI</th><th>Mức</th><th>PM2.5</th><th>PM10</th><th>CO</th><th>NO2</th><th>O3</th></tr></thead>
+            <thead><tr><th>Thời gian</th><th>AQI</th><th>Mức</th><th>PM2.5</th><th>PM10</th><th>CO</th><th>NO2</th><th>SO2</th><th>O3</th></tr></thead>
             <tbody>
                 ${data.slice(0, 8).map(r => `
                     <tr>
                         <td>${r.time}</td>
                         <td><b style="color:${colorByAqi(r.aqi)}">${r.aqi}</b></td>
                         <td><span class="badge ${levelClass(r.level, r.aqi)}">${r.level}</span></td>
-                        <td>${r.pm25}</td><td>${r.pm10}</td><td>${r.co}</td><td>${r.no2}</td><td>${r.o3}</td>
+                        <td>${fmt(r.pm25)}</td><td>${fmt(r.pm10)}</td><td>${fmt(r.co)}</td><td>${fmt(r.no2)}</td><td>${fmt(r.so2)}</td><td>${fmt(r.o3)}</td>
                     </tr>
                 `).join("")}
             </tbody>
@@ -673,8 +682,8 @@ async function compareCities() {
                 <table>
                     <thead><tr><th>Chỉ số</th><th>${data.city1.city}</th><th>${data.city2.city}</th><th>Chênh lệch</th></tr></thead>
                     <tbody>
-                        ${["aqi", "pm25", "pm10", "co", "no2", "o3"].map(key => `
-                            <tr><td>${key.toUpperCase()}</td><td>${data.city1[key]}</td><td>${data.city2[key]}</td><td>${data.difference[key]}</td></tr>
+                        ${["aqi", "pm25", "pm10", "co", "no2", "so2", "o3"].map(key => `
+                            <tr><td>${key.toUpperCase()}</td><td>${fmt(data.city1[key])}</td><td>${fmt(data.city2[key])}</td><td>${fmt(data.difference[key])}</td></tr>
                         `).join("")}
                     </tbody>
                 </table>
@@ -687,7 +696,7 @@ async function compareCities() {
 }
 
 function drawCompareChart(data) {
-    const labels = ["AQI", "PM2.5", "PM10", "CO", "NO2", "O3"];
+    const labels = ["AQI", "PM2.5", "PM10", "CO", "NO2", "SO2", "O3"];
     if (compareChart) compareChart.destroy();
     compareChart = new Chart(document.getElementById("compareChart"), {
         type: "bar",
@@ -696,12 +705,12 @@ function drawCompareChart(data) {
             datasets: [
                 {
                     label: data.city1.city,
-                    data: [data.city1.aqi, data.city1.pm25, data.city1.pm10, data.city1.co, data.city1.no2, data.city1.o3],
+                    data: [data.city1.aqi, data.city1.pm25, data.city1.pm10, data.city1.co, data.city1.no2, data.city1.so2, data.city1.o3],
                     backgroundColor: "rgba(31,143,95,0.75)"
                 },
                 {
                     label: data.city2.city,
-                    data: [data.city2.aqi, data.city2.pm25, data.city2.pm10, data.city2.co, data.city2.no2, data.city2.o3],
+                    data: [data.city2.aqi, data.city2.pm25, data.city2.pm10, data.city2.co, data.city2.no2, data.city2.so2, data.city2.o3],
                     backgroundColor: "rgba(29,138,153,0.75)"
                 }
             ]
