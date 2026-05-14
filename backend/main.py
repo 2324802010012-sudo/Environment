@@ -694,6 +694,31 @@ def compare(
     data1 = serialize_summary(row1)
     data2 = serialize_summary(row2)
 
+    # Phân tích chi tiết: chỉ số nào city tốt hơn (thấp = tốt)
+    metrics = ["aqi", "pm25", "pm10", "co", "no2", "so2", "o3"]
+    better_at = {}
+    city1_wins = 0
+    city2_wins = 0
+    
+    for metric in metrics:
+        val1 = float(data1[metric]) if data1[metric] is not None else float('inf')
+        val2 = float(data2[metric]) if data2[metric] is not None else float('inf')
+        
+        if val1 <= val2:
+            better_at[metric] = data1["city"]
+            city1_wins += 1
+        else:
+            better_at[metric] = data2["city"]
+            city2_wins += 1
+    
+    # Xác định nhận xét tổng quan
+    if city1_wins > city2_wins:
+        overall = f"{data1['city']} tốt hơn ở {city1_wins}/{len(metrics)} chỉ số"
+    elif city2_wins > city1_wins:
+        overall = f"{data2['city']} tốt hơn ở {city2_wins}/{len(metrics)} chỉ số"
+    else:
+        overall = "Hai thành phố ngang nhau về chất lượng không khí"
+
     return {
         "city1": data1,
         "city2": data2,
@@ -703,9 +728,13 @@ def compare(
                 if data1[key] is not None and data2[key] is not None
                 else None
             )
-            for key in ["aqi", "pm25", "pm10", "co", "no2", "so2", "o3"]
+            for key in metrics
         },
-        "better_city": data1["city"] if data1["aqi"] <= data2["aqi"] else data2["city"],
+        "better_at": better_at,
+        "city1_wins": city1_wins,
+        "city2_wins": city2_wins,
+        "overall_recommendation": overall,
+        "note": "Thấp = tốt (AQI, PM2.5, PM10, CO, NO2, SO2, O3 đều tính: giá trị thấp hơn là tốt hơn)",
     }
 
 @app.get("/summary")

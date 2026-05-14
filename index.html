@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="vi">
 <head>
 <meta charset="UTF-8">
@@ -750,13 +750,31 @@ async function compareCities() {
     try {
         const data = await getJson(`/compare?city1=${encodeURIComponent(city1)}&city2=${encodeURIComponent(city2)}&max_age_hours=${FRESH_HOURS}`);
         box.classList.remove("notice");
+        
+        // Tạo bảng chi tiết "better_at"
+        const betterAtRows = ["aqi", "pm25", "pm10", "co", "no2", "so2", "o3"]
+            .map(key => `<tr><td>${key.toUpperCase()}</td><td>${data.better_at[key]}</td></tr>`)
+            .join("");
+        
         box.innerHTML = `
-            <p class="winner">Thành phố có chất lượng không khí tốt hơn: ${data.better_city}. Chênh lệch AQI: ${fmt(data.difference.aqi)}</p>
+            <div style="background: #e8f5e9; padding: 12px; border-radius: 8px; margin-bottom: 16px; border-left: 4px solid #1f8f5f;">
+                <strong style="color: #1f8f5f;">📊 Nhận xét tổng quan:</strong>
+                <p style="margin: 8px 0 0 0; color: #173128;">${data.overall_recommendation}</p>
+                <p style="margin: 4px 0 0 0; font-size: 13px; color: #657a70;">
+                    ${data.city1} thắng ở ${data.city1_wins} chỉ số | ${data.city2} thắng ở ${data.city2_wins} chỉ số
+                </p>
+            </div>
+            
+            <p style="color: #657a70; font-size: 13px; margin-bottom: 12px; font-style: italic;">
+                ℹ️ Ghi chú: ${data.note}
+            </p>
+            
             <div class="compare-summary">
                 <div class="city-box"><strong>${data.city1.city}</strong><div class="metric-list">${metricRows(data.city1)}</div></div>
                 <div class="city-box"><strong>${data.city2.city}</strong><div class="metric-list">${metricRows(data.city2)}</div></div>
             </div>
-            <div class="table-wrap">
+            
+            <div class="table-wrap" style="margin-bottom: 16px;">
                 <table>
                     <thead><tr><th>Chỉ số</th><th>${data.city1.city}</th><th>${data.city2.city}</th><th>Chênh lệch</th></tr></thead>
                     <tbody>
@@ -765,6 +783,16 @@ async function compareCities() {
                         `).join("")}
                     </tbody>
                 </table>
+            </div>
+            
+            <div style="background: #f8fbf9; padding: 12px; border-radius: 8px; border: 1px solid #dce9e1;">
+                <strong style="font-size: 14px;">Phân tích chi tiết (Chỉ số nào thành phố tốt hơn?)</strong>
+                <div class="table-wrap" style="margin-top: 8px;">
+                    <table>
+                        <thead><tr><th>Chỉ số</th><th>Thành phố tốt hơn</th></tr></thead>
+                        <tbody>${betterAtRows}</tbody>
+                    </table>
+                </div>
             </div>
         `;
         drawCompareChart(data);
@@ -775,8 +803,17 @@ async function compareCities() {
 
 function drawCompareChart(data) {
     const labels = ["AQI", "PM2.5", "PM10", "CO", "NO2", "SO2", "O3"];
-    const city1 = [data.city1.aqi, data.city1.pm25, data.city1.pm10, data.city1.co, data.city1.no2, data.city1.so2, data.city1.o3];
-    const city2 = [data.city2.aqi, data.city2.pm25, data.city2.pm10, data.city2.co, data.city2.no2, data.city2.so2, data.city2.o3];
+    const city1Data = [data.city1.aqi, data.city1.pm25, data.city1.pm10, data.city1.co, data.city1.no2, data.city1.so2, data.city1.o3];
+    const city2Data = [data.city2.aqi, data.city2.pm25, data.city2.pm10, data.city2.co, data.city2.no2, data.city2.so2, data.city2.o3];
+    
+    // Xác định màu dựa trên "better_at"
+    const metrics = ["aqi", "pm25", "pm10", "co", "no2", "so2", "o3"];
+    const city1BackgroundColors = metrics.map(m => 
+        data.better_at[m] === data.city1.city ? "rgba(31,143,95,0.9)" : "rgba(31,143,95,0.45)"
+    );
+    const city2BackgroundColors = metrics.map(m => 
+        data.better_at[m] === data.city2.city ? "rgba(29,138,153,0.9)" : "rgba(29,138,153,0.45)"
+    );
 
     if (compareChart) compareChart.destroy();
     compareChart = new Chart(document.getElementById("compareChart"), {
@@ -784,15 +821,29 @@ function drawCompareChart(data) {
         data: {
             labels,
             datasets: [
-                { label: data.city1.city, data: city1, backgroundColor: "rgba(31,143,95,0.75)" },
-                { label: data.city2.city, data: city2, backgroundColor: "rgba(29,138,153,0.75)" }
+                { label: data.city1.city, data: city1Data, backgroundColor: city1BackgroundColors },
+                { label: data.city2.city, data: city2Data, backgroundColor: city2BackgroundColors }
             ]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            plugins: { legend: { position: "bottom" } },
-            scales: { y: { beginAtZero: true, grid: { color: "#e7f0ea" } }, x: { grid: { display: false } } }
+            plugins: { 
+                legend: { position: "bottom" },
+                tooltip: {
+                    callbacks: {
+                        afterLabel: function(context) {
+                            const metric = metrics[context.dataIndex];
+                            const winner = data.better_at[metric];
+                            return `Tốt hơn: ${winner}`;
+                        }
+                    }
+                }
+            },
+            scales: { 
+                y: { beginAtZero: true, grid: { color: "#e7f0ea" } }, 
+                x: { grid: { display: false } } 
+            }
         }
     });
 }
