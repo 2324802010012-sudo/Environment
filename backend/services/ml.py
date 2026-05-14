@@ -1,13 +1,21 @@
-﻿import pandas as pd
+import warnings
 from datetime import datetime, timedelta
+
+import pandas as pd
 from sklearn.cluster import KMeans
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
+
 try:
     from ..models import AirQuality
 except ImportError:
     from models import AirQuality
+
 from .cities import canonical_city_name
+
+
+FEATURE_COLUMNS = ["pm25", "pm10", "co", "no2", "so2", "o3"]
 
 
 def _station_priority(row):
@@ -23,126 +31,143 @@ def _latest_city_rows(rows):
             latest[city] = row
             continue
 
-        current_key = (current.time, -_station_priority(current))
-        row_key = (row.time, -_station_priority(row))
+        current_key = (current.observed_time, -_station_priority(current))
+        row_key = (row.observed_time, -_station_priority(row))
         if row_key > current_key:
             latest[city] = row
 
     return list(latest.values())
 
 
+def _to_float_or_none(value):
+    if pd.isna(value):
+        return None
+    return round(float(value), 2)
+
+
 def cluster_data(db, n_clusters=3, max_age_hours=None):
-    # =========================
-    # LOAD DATA
-    # =========================
     query = db.query(AirQuality)
 
     if max_age_hours is not None:
         cutoff = datetime.now() - timedelta(hours=max_age_hours)
-        query = query.filter(AirQuality.time >= cutoff)
+        query = query.filter(AirQuality.observed_time >= cutoff)
 
-    rows = _latest_city_rows(query.order_by(AirQuality.time.desc()).all())
-
+    rows = _latest_city_rows(query.order_by(AirQuality.observed_time.desc()).all())
     if not rows:
-        return {"error": "No data"}
+        return {"error": "No data", "clusters": [], "summary": []}
 
-    # =========================
-    # DATAFRAME
-    # =========================
     df = pd.DataFrame(
         [
             {
-                'city': canonical_city_name(row.city),
-                'pm25': row.pm25,
-                'pm10': row.pm10,
-                'co': row.co,
-                'no2': row.no2,
-                'so2': row.so2,
-                'o3': row.o3,
-                'aqi': row.aqi,
+                "city": canonical_city_name(row.city),
+                "pm25": row.pm25,
+                "pm10": row.pm10,
+                "co": row.co,
+                "no2": row.no2,
+                "so2": row.so2,
+                "o3": row.o3,
+                "aqi": row.aqi,
             }
             for row in rows
         ]
     )
 
-    pollutant_columns = ['pm25', 'pm10', 'co', 'no2', 'so2', 'o3']
-    df = df.dropna(subset=['aqi'])
-    for column in pollutant_columns + ['aqi']:
-        df[column] = pd.to_numeric(df[column], errors='coerce')
-    df[pollutant_columns] = df[pollutant_columns].fillna(df[pollutant_columns].median(numeric_only=True))
-    df = df.fillna(0)
+    for column in FEATURE_COLUMNS + ["aqi"]:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
 
-
-
+    df = df.dropna(subset=["aqi"])
+    df = df[df[FEATURE_COLUMNS].notna().any(axis=1)]
     if len(df) < n_clusters:
-        return {"error": "Not enough city-level data"}
+        return {
+            "error": "Not enough city-level data for KMeans",
+            "clusters": [],
+            "summary": [],
+            "model_info": {
+                "algorithm": "KMeans",
+                "n_clusters": n_clusters,
+                "sample_count": int(len(df)),
+                "fresh_window_hours": max_age_hours,
+            },
+        }
 
-    # =========================
-    # SCALE DATA (Ráº¤T QUAN TRá»ŒNG)
-    # =========================
-    features = df[pollutant_columns]
+    raw_features = df[FEATURE_COLUMNS].copy()
+    medians = raw_features.median(numeric_only=True)
+    all_missing_columns = [column for column in FEATURE_COLUMNS if pd.isna(medians[column])]
+    feature_frame = raw_features.fillna(medians).fillna(0)
 
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(features)
+    x_scaled = scaler.fit_transform(feature_frame)
 
-    # =========================
-    # KMEANS
-    # =========================
     model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    df['cluster'] = model.fit_predict(X_scaled)
-    silhouette = None
-    if len(df) > n_clusters:
-        silhouette = round(float(silhouette_score(X_scaled, df['cluster'])), 4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        df["cluster"] = model.fit_predict(x_scaled)
 
-    # =========================
-    # Sáº®P Xáº¾P CLUSTER THEO AQI
-    # =========================
+    silhouette = None
+    unique_clusters = sorted(df["cluster"].unique())
+    if len(df) > len(unique_clusters) and len(unique_clusters) > 1:
+        silhouette = round(float(silhouette_score(x_scaled, df["cluster"])), 4)
+
     cluster_order = (
-        df.groupby('cluster')['aqi']
+        df.groupby("cluster")["aqi"]
         .mean()
         .sort_values()
         .index
         .tolist()
     )
+    label_order = ["low", "medium", "high"]
+    if len(cluster_order) == 2:
+        label_order = ["low", "high"]
 
     labels = {
-        cluster_order[0]: 'low',
-        cluster_order[1]: 'medium',
-        cluster_order[2]: 'high'
+        cluster_id: label_order[min(index, len(label_order) - 1)]
+        for index, cluster_id in enumerate(cluster_order)
     }
+    df["level"] = df["cluster"].map(labels)
 
-    df['level'] = df['cluster'].map(labels)
-
-    # =========================
-    # OUTPUT
-    # =========================
     clusters = []
-    for _, row in df.sort_values('aqi').iterrows():
-        clusters.append({
-            'city': row['city'],
-            'level': row['level'],
-            'pm25': round(float(row['pm25']), 2),
-            'pm10': round(float(row['pm10']), 2),
-            'co': round(float(row['co']), 2),
-            'no2': round(float(row['no2']), 2),
-            'so2': round(float(row['so2']), 2),
-            'o3': round(float(row['o3']), 2),
-            'aqi': round(float(row['aqi']), 2),
-        })
+    for index, row in df.sort_values("aqi").iterrows():
+        original = raw_features.loc[index]
+        clusters.append(
+            {
+                "city": row["city"],
+                "cluster": int(row["cluster"]),
+                "level": row["level"],
+                "pm25": _to_float_or_none(original["pm25"]),
+                "pm10": _to_float_or_none(original["pm10"]),
+                "co": _to_float_or_none(original["co"]),
+                "no2": _to_float_or_none(original["no2"]),
+                "so2": _to_float_or_none(original["so2"]),
+                "o3": _to_float_or_none(original["o3"]),
+                "aqi": round(float(row["aqi"]), 2),
+            }
+        )
 
     summary = [
-        {'level': level, 'count': int((df['level'] == level).sum())}
-        for level in ['low', 'medium', 'high']
+        {"level": level, "count": int((df["level"] == level).sum())}
+        for level in ["low", "medium", "high"]
     ]
 
     return {
-        'clusters': clusters,
-        'summary': summary,
-        'model_info': {
-            'algorithm': 'KMeans',
-            'n_clusters': n_clusters,
-            'sample_count': int(len(df)),
-            'silhouette_score': silhouette,
-            'fresh_window_hours': max_age_hours,
-        }
+        "clusters": clusters,
+        "summary": summary,
+        "model_info": {
+            "algorithm": "KMeans",
+            "features": FEATURE_COLUMNS,
+            "n_clusters": n_clusters,
+            "sample_count": int(len(df)),
+            "silhouette_score": silhouette,
+            "fresh_window_hours": max_age_hours,
+            "imputation": "Missing pollutant features are filled with column medians for training only.",
+            "all_missing_columns": all_missing_columns,
+        },
     }
+
+
+def city_cluster_level(db, city, max_age_hours=None):
+    result = cluster_data(db, max_age_hours=max_age_hours)
+    canonical = canonical_city_name(city)
+    for row in result.get("clusters", []):
+        if canonical_city_name(row["city"]) == canonical:
+            return row
+    return None

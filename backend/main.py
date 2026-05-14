@@ -1,32 +1,31 @@
-﻿import os
+import os
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, time as datetime_time, timedelta
+from typing import Optional
 from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import inspect, text
-from sqlalchemy import or_
+from sqlalchemy import asc, desc, inspect, or_, text
 from sqlalchemy.orm import Session
 
 try:
-    from . import crud
-    from . import models
+    from . import crud, models
     from .database import SessionLocal, engine
-    from .services.cities import CITY_PROFILES, canonical_city_name, city_search_terms
-    from .services.crawler_openmeteo import fetch_data_openmeteo, GLOBAL_CITIES
+    from .services.cities import CITY_PROFILES, canonical_city_name, city_search_terms, strip_accents
+    from .services.crawler_openmeteo import GLOBAL_CITIES, fetch_data_openmeteo
     from .services.data_loader import DataLoader
-    from .services.ml import cluster_data
+    from .services.ml import city_cluster_level, cluster_data
     from .services.predict import predict_aqi
     from .services.robots_checker import check_openmeteo_compliance
 except ImportError:
     import crud
     import models
     from database import SessionLocal, engine
-    from services.cities import CITY_PROFILES, canonical_city_name, city_search_terms
-    from services.crawler_openmeteo import fetch_data_openmeteo, GLOBAL_CITIES
+    from services.cities import CITY_PROFILES, canonical_city_name, city_search_terms, strip_accents
+    from services.crawler_openmeteo import GLOBAL_CITIES, fetch_data_openmeteo
     from services.data_loader import DataLoader
-    from services.ml import cluster_data
+    from services.ml import city_cluster_level, cluster_data
     from services.predict import predict_aqi
     from services.robots_checker import check_openmeteo_compliance
 
@@ -34,25 +33,68 @@ except ImportError:
 models.Base.metadata.create_all(bind=engine)
 
 
+def _column_names(inspector, table_name):
+    if not inspector.has_table(table_name):
+        return set()
+    return {column["name"] for column in inspector.get_columns(table_name)}
+
+
 def ensure_air_quality_schema():
+    """Small safe migration layer for projects that already had the old schema."""
     inspector = inspect(engine)
-    existing_columns = {
-        column["name"]
-        for column in inspector.get_columns(models.AirQuality.__tablename__)
+    table_columns = {
+        "air_quality": _column_names(inspector, "air_quality"),
+        "air_quality_history": _column_names(inspector, "air_quality_history"),
     }
+
     migrations = []
+    common_columns = {
+        "country": "VARCHAR(100) DEFAULT 'Vietnam'",
+        "latitude": "FLOAT NULL",
+        "longitude": "FLOAT NULL",
+        "observed_time": "DATETIME NULL",
+        "collected_at": "DATETIME NULL",
+        "so2": "FLOAT NULL",
+        "station": "VARCHAR(200) NULL",
+    }
 
-    if "country" not in existing_columns:
-        migrations.append("ALTER TABLE air_quality ADD COLUMN country VARCHAR(100) DEFAULT 'Vietnam'")
-    if "so2" not in existing_columns:
-        migrations.append("ALTER TABLE air_quality ADD COLUMN so2 FLOAT NULL")
-
-    if not migrations:
-        return
+    for table_name, columns in table_columns.items():
+        if not columns:
+            continue
+        for column_name, column_type in common_columns.items():
+            if column_name not in columns:
+                migrations.append(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
     with engine.begin() as connection:
         for statement in migrations:
             connection.execute(text(statement))
+
+        refreshed = inspect(engine)
+        for table_name in ("air_quality", "air_quality_history"):
+            columns = _column_names(refreshed, table_name)
+            if "observed_time" in columns and "time" in columns:
+                connection.execute(
+                    text(
+                        f"UPDATE {table_name} "
+                        "SET observed_time = time "
+                        "WHERE observed_time IS NULL AND time IS NOT NULL"
+                    )
+                )
+            if "collected_at" in columns:
+                if table_name == "air_quality_history" and "crawled_at" in columns:
+                    connection.execute(
+                        text(
+                            "UPDATE air_quality_history "
+                            "SET collected_at = crawled_at "
+                            "WHERE collected_at IS NULL AND crawled_at IS NOT NULL"
+                        )
+                    )
+                connection.execute(
+                    text(
+                        f"UPDATE {table_name} "
+                        "SET collected_at = NOW() WHERE collected_at IS NULL"
+                    )
+                )
 
 
 ensure_air_quality_schema()
@@ -68,8 +110,8 @@ app.add_middleware(
 )
 
 CRAWL_LOCK = threading.Lock()
-AUTO_CRAWL_ENABLED = os.getenv("AUTO_CRAWL_ENABLED", "true").lower() == "true"
-AUTO_CRAWL_INTERVAL_SECONDS = int(os.getenv("AUTO_CRAWL_INTERVAL_SECONDS", "900"))
+AUTO_CRAWL_ENABLED = os.getenv("AUTO_CRAWL_ENABLED", "false").lower() == "true"
+AUTO_CRAWL_INTERVAL_SECONDS = int(os.getenv("AUTO_CRAWL_INTERVAL_SECONDS", "3600"))
 AUTO_CRAWL_TARGET = int(os.getenv("AUTO_CRAWL_TARGET", "1500"))
 CURRENT_DATA_MAX_AGE_HOURS = int(os.getenv("CURRENT_DATA_MAX_AGE_HOURS", "48"))
 CRAWL_MIN_INTERVAL_SECONDS = int(os.getenv("CRAWL_MIN_INTERVAL_SECONDS", "300"))
@@ -86,6 +128,32 @@ AUTO_CRAWL_STATUS = {
     "min_manual_interval_seconds": CRAWL_MIN_INTERVAL_SECONDS,
 }
 
+POLLUTANT_FIELDS = ["pm25", "pm10", "co", "no2", "so2", "o3"]
+SORTABLE_FIELDS = ["time", "aqi", *POLLUTANT_FIELDS]
+RANKING_METRICS = ["aqi", *POLLUTANT_FIELDS, "pollution_score"]
+POLLUTION_WEIGHTS = {
+    "aqi": 0.5,
+    "pm25": 0.2,
+    "pm10": 0.15,
+    "no2": 0.05,
+    "so2": 0.05,
+    "o3": 0.05,
+}
+LEVEL_RANGES = {
+    "good": (0, 50),
+    "tot": (0, 50),
+    "moderate": (51, 100),
+    "trung_binh": (51, 100),
+    "unhealthy_sensitive": (101, 150),
+    "kem": (101, 150),
+    "unhealthy": (101, 200),
+    "xau": (101, 200),
+    "very_unhealthy": (201, 300),
+    "rat_xau": (201, 300),
+    "hazardous": (301, 500),
+    "nguy_hai": (301, 500),
+}
+
 
 def get_db():
     db = SessionLocal()
@@ -95,8 +163,14 @@ def get_db():
         db.close()
 
 
+def metric(value):
+    return round(float(value), 2) if value is not None else None
+
+
 def aqi_level(aqi):
-    aqi = float(aqi or 0)
+    if aqi is None:
+        return "Không có dữ liệu"
+    aqi = float(aqi)
     if aqi <= 50:
         return "Tốt"
     if aqi <= 100:
@@ -110,50 +184,103 @@ def aqi_level(aqi):
     return "Nguy hại"
 
 
-def serialize_row(row):
-    aqi = float(row.aqi) if row.aqi is not None else 0
-    def metric(value):
-        return round(float(value), 2) if value is not None else None
+def aqi_level_code(aqi):
+    if aqi is None:
+        return "unknown"
+    aqi = float(aqi)
+    if aqi <= 50:
+        return "good"
+    if aqi <= 100:
+        return "moderate"
+    if aqi <= 200:
+        return "unhealthy"
+    if aqi <= 300:
+        return "very_unhealthy"
+    return "hazardous"
+
+
+def parse_datetime_param(value: Optional[str], end_of_day=False):
+    if not value:
+        return None
+    try:
+        cleaned = value.strip()
+        if len(cleaned) == 10:
+            parsed_date = datetime.fromisoformat(cleaned).date()
+            boundary = datetime_time.max if end_of_day else datetime_time.min
+            return datetime.combine(parsed_date, boundary).replace(microsecond=0)
+        return datetime.fromisoformat(cleaned.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid date/datetime: {value}") from exc
+
+
+def level_range(level):
+    if not level:
+        return None
+    key = strip_accents(level).replace(" ", "_")
+    return LEVEL_RANGES.get(key)
+
+
+def data_quality(row):
+    present = [field for field in POLLUTANT_FIELDS if getattr(row, field) is not None]
+    if len(present) == len(POLLUTANT_FIELDS):
+        quality = "complete"
+    elif present:
+        quality = "partial"
+    else:
+        quality = "aqi_only"
 
     return {
+        "quality": quality,
+        "available_pollutants": present,
+        "missing_pollutants": [field for field in POLLUTANT_FIELDS if field not in present],
+    }
+
+
+def row_age_hours(row):
+    observed_time = getattr(row, "observed_time", None)
+    if not row or not observed_time:
+        return None
+    return round(max(0, (datetime.now() - observed_time).total_seconds() / 3600), 2)
+
+
+def serialize_row(row, cluster_level=None):
+    aqi = metric(row.aqi)
+    return {
+        "id": row.id,
         "city": canonical_city_name(row.city),
-        "time": str(row.time),
-        "aqi": round(aqi, 2),
+        "country": row.country,
+        "latitude": metric(row.latitude),
+        "longitude": metric(row.longitude),
+        "observed_time": str(row.observed_time) if row.observed_time else None,
+        "time": str(row.observed_time) if row.observed_time else None,
+        "collected_at": str(row.collected_at) if row.collected_at else None,
         "pm25": metric(row.pm25),
         "pm10": metric(row.pm10),
         "co": metric(row.co),
         "no2": metric(row.no2),
         "so2": metric(row.so2),
         "o3": metric(row.o3),
+        "aqi": aqi,
         "level": aqi_level(aqi),
+        "level_code": aqi_level_code(aqi),
+        "cluster_level": cluster_level,
+        "station": row.station,
+        "source": row.station,
         **data_quality(row),
     }
 
 
-def serialize_summary(row):
-    aqi = float(row.aqi) if row.aqi is not None else 0
-    def metric(value):
-        return round(float(value), 2) if value is not None else None
-
-    return {
-        "city": canonical_city_name(row.city),
-        "pm25": metric(row.pm25),
-        "pm10": metric(row.pm10),
-        "co": metric(row.co),
-        "no2": metric(row.no2),
-        "so2": metric(row.so2),
-        "o3": metric(row.o3),
-        "aqi": round(aqi, 2),
-        "level": aqi_level(aqi),
-        **data_quality(row),
-    }
+def serialize_summary(row, cluster_level=None):
+    payload = serialize_row(row, cluster_level=cluster_level)
+    payload.pop("id", None)
+    return payload
 
 
 def distinct_time_series(rows):
     unique = []
     seen = set()
     for row in rows:
-        key = str(row.time)
+        key = str(row.observed_time)
         if key in seen:
             continue
         seen.add(key)
@@ -168,27 +295,27 @@ def average_present(rows, field):
     return round(sum(values) / len(values), 2)
 
 
-def data_quality(row):
-    pollutant_fields = ["pm25", "pm10", "co", "no2", "so2", "o3"]
-    present = [field for field in pollutant_fields if getattr(row, field) is not None]
-    if len(present) == len(pollutant_fields):
-        quality = "complete"
-    elif present:
-        quality = "partial"
-    else:
-        quality = "aqi_only"
+def pollution_score_for_row(row):
+    parts = []
+    for field, weight in POLLUTION_WEIGHTS.items():
+        value = getattr(row, field, None)
+        if value is not None:
+            parts.append((float(value), weight, field))
 
+    if not parts:
+        return None, []
+
+    weight_sum = sum(weight for _, weight, _ in parts)
+    score = sum(value * weight for value, weight, _ in parts) / weight_sum
+    return round(score, 2), [field for _, _, field in parts]
+
+
+def cluster_map(db, max_age_hours=None):
+    result = cluster_data(db, max_age_hours=max_age_hours)
     return {
-        "quality": quality,
-        "available_pollutants": present,
-        "missing_pollutants": [field for field in pollutant_fields if field not in present],
+        canonical_city_name(row["city"]): row.get("level")
+        for row in result.get("clusters", [])
     }
-
-
-def row_age_hours(row):
-    if not row or not row.time:
-        return None
-    return round(max(0, (datetime.now() - row.time).total_seconds() / 3600), 2)
 
 
 def manual_crawl_wait_seconds(force=False):
@@ -198,11 +325,7 @@ def manual_crawl_wait_seconds(force=False):
     return max(0, int(CRAWL_MIN_INTERVAL_SECONDS - elapsed))
 
 
-def run_crawl_job(
-    db,
-    target=1500,
-    replace_existing=True,
-):
+def run_crawl_job(db, target=1500, replace_existing=True):
     source = "open-meteo"
     raw_data = fetch_data_openmeteo(target_records=target, cities_list=GLOBAL_CITIES)
     clean_data, stats = DataLoader().load_and_process(raw_data)
@@ -212,6 +335,8 @@ def run_crawl_job(
             "error": "No valid data fetched",
             "raw_count": len(raw_data),
             "clean_count": stats["valid_count"],
+            "invalid_count": stats.get("invalid_count", 0),
+            "archived_count": 0,
             "deleted_count": 0,
             "inserted_count": 0,
             "replace_existing": replace_existing,
@@ -228,6 +353,7 @@ def run_crawl_job(
         "message": "Data refreshed" if replace_existing else "Data inserted",
         "raw_count": len(raw_data),
         "clean_count": stats["valid_count"],
+        "invalid_count": stats.get("invalid_count", 0),
         "archived_count": archived,
         "deleted_count": deleted,
         "inserted_count": inserted,
@@ -259,9 +385,6 @@ def find_city_profile(city):
     for profile in CITY_PROFILES:
         if canonical_city_name(profile["name"]) == canonical:
             return profile
-        for alias in profile.get("aliases", []):
-            if canonical_city_name(alias) == canonical:
-                return profile
     return None
 
 
@@ -297,13 +420,7 @@ def source_url(city: str = Query(...)):
     }
 
 
-@app.get("/crawl")
-def crawl(
-    target: int = Query(1500, ge=1, le=5000),
-    replace_existing: bool = Query(True),
-    force: bool = Query(False),
-    db: Session = Depends(get_db),
-):
+def start_crawl(target, replace_existing, force, db):
     global LAST_MANUAL_CRAWL_AT
     wait_seconds = manual_crawl_wait_seconds(force=force)
     if wait_seconds > 0:
@@ -316,6 +433,7 @@ def crawl(
             "deleted_count": 0,
             "inserted_count": 0,
             "replace_existing": replace_existing,
+            "source": "open-meteo",
         }
 
     if not CRAWL_LOCK.acquire(blocking=False):
@@ -327,27 +445,35 @@ def crawl(
             "deleted_count": 0,
             "inserted_count": 0,
             "replace_existing": replace_existing,
+            "source": "open-meteo",
         }
 
     try:
-        try:
-            LAST_MANUAL_CRAWL_AT = datetime.now()
-            return run_crawl_job(
-                db,
-                target=target,
-                replace_existing=replace_existing,
-            )
-        except Exception as exc:
-            return {
-                "error": f"Crawl failed: {exc}",
-                "raw_count": 0,
-                "clean_count": 0,
-                "archived_count": 0,
-                "deleted_count": 0,
-                "inserted_count": 0,
-            }
+        LAST_MANUAL_CRAWL_AT = datetime.now()
+        return run_crawl_job(db, target=target, replace_existing=replace_existing)
+    except Exception as exc:
+        return {
+            "error": f"Crawl failed: {exc}",
+            "raw_count": 0,
+            "clean_count": 0,
+            "archived_count": 0,
+            "deleted_count": 0,
+            "inserted_count": 0,
+            "replace_existing": replace_existing,
+            "source": "open-meteo",
+        }
     finally:
         CRAWL_LOCK.release()
+
+
+@app.get("/crawl")
+def crawl(
+    target: int = Query(1500, ge=1, le=5000),
+    replace_existing: bool = Query(True),
+    force: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    return start_crawl(target, replace_existing, force, db)
 
 
 @app.get("/crawl-openmeteo")
@@ -357,95 +483,7 @@ def crawl_openmeteo(
     force: bool = Query(False),
     db: Session = Depends(get_db),
 ):
-    """
-    Crawl from Open-Meteo Air Quality API.
-    
-    Advantages:
-    - No API key required
-    - Global cities support
-    - All indicators: AQI, PM2.5, PM10, CO, NO2, SO2, O3
-    - No rate limiting
-    
-    Query params:
-    - target: number of records to fetch (default 1500)
-    
-    Returns:
-    - raw_count: records fetched from API
-    - clean_count: valid records after processing
-    - inserted_count: new records saved to database
-    """
-    global LAST_MANUAL_CRAWL_AT
-    wait_seconds = manual_crawl_wait_seconds(force=force)
-    if wait_seconds > 0:
-        return {
-            "error": f"Please wait {wait_seconds} seconds before starting another crawl.",
-            "retry_after_seconds": wait_seconds,
-            "raw_count": 0,
-            "clean_count": 0,
-            "archived_count": 0,
-            "deleted_count": 0,
-            "inserted_count": 0,
-            "replace_existing": replace_existing,
-            "source": "open-meteo",
-        }
-
-    if not CRAWL_LOCK.acquire(blocking=False):
-        return {
-            "error": "A crawl job is already running. Please wait for it to finish.",
-            "raw_count": 0,
-            "clean_count": 0,
-            "archived_count": 0,
-            "deleted_count": 0,
-            "inserted_count": 0,
-            "replace_existing": replace_existing,
-        }
-
-    try:
-        LAST_MANUAL_CRAWL_AT = datetime.now()
-        raw_data = fetch_data_openmeteo(target_records=target, cities_list=GLOBAL_CITIES)
-        clean_data, stats = DataLoader().load_and_process(raw_data)
-        
-        if not clean_data:
-            return {
-                "error": "No valid data fetched",
-                "raw_count": len(raw_data),
-                "clean_count": stats["valid_count"],
-                "archived_count": 0,
-                "deleted_count": 0,
-                "inserted_count": 0,
-                "replace_existing": replace_existing,
-                "source": "open-meteo",
-            }
-        
-        deleted = 0
-        archived = crud.archive_data(db, clean_data)
-        if replace_existing:
-            deleted = crud.clear_data(db)
-
-        inserted = crud.insert_data(db, clean_data)
-        return {
-            "message": "Data refreshed from Open-Meteo" if replace_existing else "Data inserted from Open-Meteo",
-            "raw_count": len(raw_data),
-            "clean_count": stats["valid_count"],
-            "archived_count": archived,
-            "deleted_count": deleted,
-            "inserted_count": inserted,
-            "replace_existing": replace_existing,
-            "source": "open-meteo",
-        }
-    except Exception as exc:
-        return {
-            "error": f"OpenMeteo crawl failed: {exc}",
-            "raw_count": 0,
-            "clean_count": 0,
-            "archived_count": 0,
-            "deleted_count": 0,
-            "inserted_count": 0,
-            "replace_existing": replace_existing,
-            "source": "open-meteo",
-        }
-    finally:
-        CRAWL_LOCK.release()
+    return start_crawl(target, replace_existing, force, db)
 
 
 @app.get("/compliance")
@@ -453,12 +491,516 @@ def compliance():
     return {
         "legal_target": check_openmeteo_compliance(),
         "pipeline": [
-            "Thu thap: requests goi Open-Meteo Air Quality API truc tiep tu Internet",
-            "Tien xu ly: DataLoader dung Pandas de clean, ep kieu, loc AQI va bo trung",
-            "Luu tru: SQLAlchemy ghi vao bang air_quality trong MySQL",
+            "Thu thập: requests gọi Open-Meteo Air Quality API trực tiếp từ Internet",
+            "Tiền xử lý: DataLoader dùng Pandas để clean, ép kiểu, lọc AQI và bỏ trùng",
+            "Lưu trữ: SQLAlchemy ghi vào bảng air_quality trong MySQL",
         ],
         "no_prebuilt_dataset": True,
-        "html_scraping": "Khong scrape HTML; he thong chi dung Open-Meteo Air Quality API.",
+        "html_scraping": "Không scrape HTML; hệ thống chỉ dùng Open-Meteo Air Quality API.",
+    }
+
+
+@app.post("/maintenance/nullify-zero-pollutants")
+def nullify_zero_pollutants(db: Session = Depends(get_db)):
+    updated = 0
+
+    rows = db.query(models.AirQuality).all()
+    for row in rows:
+        changed = False
+        values = [getattr(row, field) for field in POLLUTANT_FIELDS]
+        zero_count = sum(1 for value in values if value == 0)
+        present_count = sum(1 for value in values if value is not None)
+
+        if row.aqi and zero_count and present_count < len(POLLUTANT_FIELDS):
+            for field in POLLUTANT_FIELDS:
+                if getattr(row, field) == 0:
+                    setattr(row, field, None)
+                    changed = True
+
+        if changed:
+            updated += 1
+
+    db.commit()
+    return {"message": "Zero pollutant cleanup completed", "updated_rows": updated}
+
+
+@app.get("/map")
+def get_map_data(
+    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    rows = crud.get_latest_city_rows(db, max_age_hours=max_age_hours)
+    data_dict = {canonical_city_name(row.city): row for row in rows}
+
+    result = []
+    for profile in CITY_PROFILES:
+        name = profile["name"]
+        row = data_dict.get(name)
+        aqi = float(row.aqi) if row and row.aqi is not None else None
+        lat = row.latitude if row and row.latitude is not None else profile["coords"][0]
+        lon = row.longitude if row and row.longitude is not None else profile["coords"][1]
+        result.append(
+            {
+                "city": name,
+                "country": profile.get("country", "Vietnam"),
+                "lat": lat,
+                "lng": lon,
+                "aqi": round(aqi, 2) if aqi is not None else None,
+                "level": aqi_level(aqi) if aqi is not None else "Không có dữ liệu mới",
+                "time": str(row.observed_time) if row and row.observed_time else None,
+                "age_hours": row_age_hours(row),
+                "fresh_window_hours": max_age_hours,
+                "has_fresh_data": row is not None,
+            }
+        )
+    return result
+
+
+@app.get("/ranking")
+def ranking(
+    limit: int = Query(10, ge=1, le=100),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    metric_name: str = Query("aqi", alias="metric"),
+    sort_by: Optional[str] = Query(None),
+    rank_by: Optional[str] = Query(None),
+    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
+    country: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    selected_metric = (rank_by or sort_by or metric_name).lower()
+    if selected_metric not in RANKING_METRICS:
+        raise HTTPException(status_code=400, detail=f"Invalid ranking metric: {selected_metric}")
+
+    cluster_levels = cluster_map(db, max_age_hours=max_age_hours)
+    rows = crud.get_latest_city_rows(db, max_age_hours=max_age_hours)
+    items = []
+
+    for row in rows:
+        if country and (row.country or "").lower() != country.lower():
+            continue
+
+        score, score_fields = pollution_score_for_row(row)
+        value = score if selected_metric == "pollution_score" else metric_value(row, selected_metric)
+        city = canonical_city_name(row.city)
+        items.append(
+            {
+                "city": city,
+                "country": row.country,
+                "aqi": metric(row.aqi),
+                "pm25": metric(row.pm25),
+                "pm10": metric(row.pm10),
+                "co": metric(row.co),
+                "no2": metric(row.no2),
+                "so2": metric(row.so2),
+                "o3": metric(row.o3),
+                "pollution_score": score,
+                "pollution_score_fields": score_fields,
+                "ranking_metric": selected_metric,
+                "ranking_value": value,
+                "level": aqi_level(row.aqi),
+                "level_code": aqi_level_code(row.aqi),
+                "cluster_level": cluster_levels.get(city),
+                "time": str(row.observed_time) if row.observed_time else None,
+                "age_hours": row_age_hours(row),
+                "fresh_window_hours": max_age_hours,
+            }
+        )
+
+    reverse = order == "desc"
+    items.sort(
+        key=lambda item: (
+            item["ranking_value"] is None,
+            item["ranking_value"] if item["ranking_value"] is not None else 0,
+        ),
+        reverse=reverse,
+    )
+    if reverse:
+        items.sort(key=lambda item: item["ranking_value"] is None)
+    return items[:limit]
+
+
+def metric_value(row, field):
+    value = getattr(row, field, None)
+    return metric(value)
+
+
+@app.get("/city")
+def get_by_city(
+    city: str = Query(...),
+    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    cluster_info = city_cluster_level(db, city, max_age_hours=max_age_hours)
+    cluster_level = cluster_info.get("level") if cluster_info else None
+    return [
+        serialize_row(row, cluster_level=cluster_level)
+        for row in crud.get_city_history(db, city, limit=50, max_age_hours=max_age_hours)
+    ]
+
+
+@app.get("/search")
+def search(
+    city: Optional[str] = Query(None),
+    country: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    min_aqi: Optional[float] = Query(None, ge=0, le=500),
+    max_aqi: Optional[float] = Query(None, ge=0, le=500),
+    level: Optional[str] = Query(None),
+    pollutant: Optional[str] = Query(None),
+    sort_by: str = Query("time"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    limit: int = Query(50, ge=1, le=500),
+    max_age_hours: Optional[int] = Query(None, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    pollutant = pollutant.lower() if pollutant else None
+    sort_by = sort_by.lower()
+    if pollutant and pollutant not in ["aqi", *POLLUTANT_FIELDS]:
+        raise HTTPException(status_code=400, detail=f"Invalid pollutant: {pollutant}")
+    if sort_by not in SORTABLE_FIELDS:
+        raise HTTPException(status_code=400, detail=f"Invalid sort_by: {sort_by}")
+
+    start_dt = parse_datetime_param(start_date)
+    end_dt = parse_datetime_param(end_date, end_of_day=True)
+    range_filter = level_range(level)
+
+    query = db.query(models.AirQuality)
+    if city:
+        filters = [models.AirQuality.city.ilike(f"%{term}%") for term in city_search_terms(city)]
+        query = query.filter(or_(*filters))
+    if country:
+        query = query.filter(models.AirQuality.country.ilike(f"%{country}%"))
+    if start_dt:
+        query = query.filter(models.AirQuality.observed_time >= start_dt)
+    if end_dt:
+        query = query.filter(models.AirQuality.observed_time <= end_dt)
+    if max_age_hours and not start_dt:
+        query = query.filter(models.AirQuality.observed_time >= datetime.now() - timedelta(hours=max_age_hours))
+    if min_aqi is not None:
+        query = query.filter(models.AirQuality.aqi >= min_aqi)
+    if max_aqi is not None:
+        query = query.filter(models.AirQuality.aqi <= max_aqi)
+    if range_filter:
+        query = query.filter(models.AirQuality.aqi >= range_filter[0], models.AirQuality.aqi <= range_filter[1])
+    if pollutant:
+        query = query.filter(getattr(models.AirQuality, pollutant).isnot(None))
+
+    sort_column = models.AirQuality.observed_time if sort_by == "time" else getattr(models.AirQuality, sort_by)
+    direction = desc(sort_column) if order == "desc" else asc(sort_column)
+    rows = query.order_by(sort_column.is_(None), direction).limit(limit).all()
+
+    clusters = cluster_map(db, max_age_hours=max_age_hours or CURRENT_DATA_MAX_AGE_HOURS)
+    return {
+        "count": len(rows),
+        "filters": {
+            "city": city,
+            "country": country,
+            "start_date": start_date,
+            "end_date": end_date,
+            "min_aqi": min_aqi,
+            "max_aqi": max_aqi,
+            "level": level,
+            "pollutant": pollutant,
+            "sort_by": sort_by,
+            "order": order,
+            "limit": limit,
+        },
+        "results": [
+            serialize_row(row, cluster_level=clusters.get(canonical_city_name(row.city)))
+            for row in rows
+        ],
+    }
+
+
+def compare_latest_rows(row1, row2):
+    data1 = serialize_summary(row1)
+    data2 = serialize_summary(row2)
+    metrics = ["aqi", *POLLUTANT_FIELDS]
+    better_at = {}
+    city1_wins = 0
+    city2_wins = 0
+
+    for field in metrics:
+        val1 = data1[field]
+        val2 = data2[field]
+        if val1 is None and val2 is None:
+            better_at[field] = None
+        elif val2 is None or (val1 is not None and val1 <= val2):
+            better_at[field] = data1["city"]
+            city1_wins += 1
+        else:
+            better_at[field] = data2["city"]
+            city2_wins += 1
+
+    if city1_wins > city2_wins:
+        overall = f"{data1['city']} tốt hơn ở {city1_wins}/{len(metrics)} chỉ số có thể so sánh"
+    elif city2_wins > city1_wins:
+        overall = f"{data2['city']} tốt hơn ở {city2_wins}/{len(metrics)} chỉ số có thể so sánh"
+    else:
+        overall = "Hai thành phố khá cân bằng theo dữ liệu mới nhất"
+
+    return {
+        "city1": data1,
+        "city2": data2,
+        "difference": {
+            field: round(abs(float(data1[field]) - float(data2[field])), 2)
+            if data1[field] is not None and data2[field] is not None
+            else None
+            for field in metrics
+        },
+        "better_at": better_at,
+        "city1_wins": city1_wins,
+        "city2_wins": city2_wins,
+        "overall_recommendation": overall,
+        "note": "Giá trị thấp hơn thường tốt hơn đối với AQI, PM2.5, PM10, CO, NO2, SO2, O3.",
+    }
+
+
+@app.get("/compare")
+def compare(
+    city1: str = Query(...),
+    city2: str = Query(...),
+    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    rows = crud.get_latest_city_rows(db, max_age_hours=max_age_hours)
+    data = {canonical_city_name(row.city): row for row in rows}
+
+    row1 = data.get(canonical_city_name(city1))
+    row2 = data.get(canonical_city_name(city2))
+    if not row1:
+        raise HTTPException(status_code=404, detail=f"City not found: {city1}")
+    if not row2:
+        raise HTTPException(status_code=404, detail=f"City not found: {city2}")
+
+    return compare_latest_rows(row1, row2)
+
+
+@app.get("/compare-history")
+def compare_history(
+    city1: str = Query(...),
+    city2: str = Query(...),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    max_age_hours: int = Query(168, ge=1, le=2160),
+    limit: int = Query(300, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    start_dt = parse_datetime_param(start_date) or (datetime.now() - timedelta(hours=max_age_hours))
+    end_dt = parse_datetime_param(end_date, end_of_day=True) or datetime.now()
+
+    rows1 = crud.get_city_history_between(db, city1, start_dt, end_dt, limit=limit)
+    rows2 = crud.get_city_history_between(db, city2, start_dt, end_dt, limit=limit)
+    if not rows1:
+        raise HTTPException(status_code=404, detail=f"No history found for {city1}")
+    if not rows2:
+        raise HTTPException(status_code=404, detail=f"No history found for {city2}")
+
+    latest_payload = compare_latest_rows(rows1[0], rows2[0])
+    avg1 = {field: average_present(rows1, field) for field in ["aqi", *POLLUTANT_FIELDS]}
+    avg2 = {field: average_present(rows2, field) for field in ["aqi", *POLLUTANT_FIELDS]}
+    avg_aqi1 = avg1["aqi"]
+    avg_aqi2 = avg2["aqi"]
+
+    if avg_aqi1 is not None and avg_aqi2 is not None:
+        better_city = canonical_city_name(city1) if avg_aqi1 <= avg_aqi2 else canonical_city_name(city2)
+        recommendation = f"{better_city} có AQI trung bình thấp hơn trong khoảng thời gian này."
+    else:
+        recommendation = "Chưa đủ dữ liệu AQI trung bình để kết luận."
+
+    def series(rows):
+        ordered = list(reversed(rows))
+        return [
+            {
+                "time": str(row.observed_time),
+                "aqi": metric(row.aqi),
+                "pm25": metric(row.pm25),
+                "pm10": metric(row.pm10),
+            }
+            for row in ordered
+        ]
+
+    return {
+        "city1": canonical_city_name(city1),
+        "city2": canonical_city_name(city2),
+        "start_date": str(start_dt),
+        "end_date": str(end_dt),
+        "latest": latest_payload,
+        "averages": {
+            "city1": {"city": canonical_city_name(city1), **avg1},
+            "city2": {"city": canonical_city_name(city2), **avg2},
+        },
+        "series": {
+            "city1": series(rows1),
+            "city2": series(rows2),
+        },
+        "recommendation": recommendation,
+    }
+
+
+@app.get("/summary")
+def summary(
+    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    latest = crud.get_latest_city_rows(db, max_age_hours=max_age_hours)
+    total_records = crud.count_records(db)
+    fresh_records = crud.count_records(db, max_age_hours=max_age_hours)
+
+    if not latest:
+        return {
+            "message": "No fresh data available",
+            "tracked_city_count": len(CITY_PROFILES),
+            "count_city": 0,
+            "total_record_count": total_records,
+            "fresh_record_count": fresh_records,
+            "fresh_window_hours": max_age_hours,
+            "avg_aqi": None,
+            "max_aqi": None,
+            "avg_pm25": None,
+            "avg_pm10": None,
+            "avg_so2": None,
+            "best_places": [],
+            "worst_places": [],
+        }
+
+    avg_aqi = average_present(latest, "aqi")
+    max_aqi = max(float(row.aqi) for row in latest if row.aqi is not None)
+    best = sorted(latest, key=lambda row: float(row.aqi) if row.aqi is not None else float("inf"))[:5]
+    worst = sorted(latest, key=lambda row: float(row.aqi) if row.aqi is not None else float("-inf"), reverse=True)[:5]
+
+    return {
+        "tracked_city_count": len(CITY_PROFILES),
+        "count_city": len(latest),
+        "total_record_count": total_records,
+        "fresh_record_count": fresh_records,
+        "fresh_window_hours": max_age_hours,
+        "avg_aqi": avg_aqi,
+        "max_aqi": round(max_aqi, 2),
+        "avg_pm25": average_present(latest, "pm25"),
+        "avg_pm10": average_present(latest, "pm10"),
+        "avg_so2": average_present(latest, "so2"),
+        "best_places": [
+            {"city": canonical_city_name(row.city), "aqi": metric(row.aqi)}
+            for row in best
+        ],
+        "worst_places": [
+            {"city": canonical_city_name(row.city), "aqi": metric(row.aqi)}
+            for row in worst
+        ],
+    }
+
+
+@app.get("/chart")
+def get_chart(
+    city: str,
+    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    filters = [models.AirQuality.city.ilike(f"%{term}%") for term in city_search_terms(city)]
+    rows = (
+        db.query(models.AirQuality)
+        .filter(or_(*filters))
+        .filter(models.AirQuality.observed_time >= datetime.now() - timedelta(hours=max_age_hours))
+        .order_by(models.AirQuality.observed_time.desc())
+        .limit(50)
+        .all()
+    )
+    rows = distinct_time_series(rows)[-24:]
+    return {
+        "labels": [str(row.observed_time) for row in rows],
+        "aqi": [metric(row.aqi) for row in rows],
+    }
+
+
+@app.get("/chart_multi")
+def get_chart_multi(
+    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    cutoff = datetime.now() - timedelta(hours=max_age_hours)
+    active_cities = [
+        row.city
+        for row in sorted(
+            crud.get_latest_city_rows(db, max_age_hours=max_age_hours),
+            key=lambda item: float(item.aqi) if item.aqi is not None else 0,
+            reverse=True,
+        )[:6]
+    ]
+    result = {}
+
+    for city in active_cities:
+        terms = city_search_terms(city)
+        rows = (
+            db.query(models.AirQuality)
+            .filter(or_(*[models.AirQuality.city.ilike(f"%{term}%") for term in terms]))
+            .filter(models.AirQuality.observed_time >= cutoff)
+            .order_by(models.AirQuality.observed_time.desc())
+            .limit(40)
+            .all()
+        )
+        rows = distinct_time_series(rows)[-24:]
+        result[canonical_city_name(city)] = {
+            "labels": [str(row.observed_time) for row in rows],
+            "aqi": [metric(row.aqi) for row in rows],
+        }
+
+    return result
+
+
+@app.get("/cluster")
+def cluster(
+    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    return cluster_data(db, max_age_hours=max_age_hours)
+
+
+@app.get("/predict")
+def predict(
+    city: Optional[str] = Query(None),
+    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    return predict_aqi(db, city=city, max_age_hours=max_age_hours)
+
+
+@app.get("/city-insight")
+def city_insight(
+    city: str = Query(...),
+    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
+    history_limit: int = Query(24, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    rows = crud.get_city_history(db, city, limit=history_limit, max_age_hours=max_age_hours)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No fresh data found for {city}")
+
+    cluster_info = city_cluster_level(db, city, max_age_hours=max_age_hours)
+    cluster_level = cluster_info.get("level") if cluster_info else None
+    prediction = predict_aqi(db, city=city, max_age_hours=max_age_hours)
+    latest = serialize_row(rows[0], cluster_level=cluster_level)
+    aqi = latest["aqi"]
+
+    if aqi is None:
+        comment = "Chưa có AQI mới để nhận xét."
+    elif aqi <= 50:
+        comment = "Không khí đang ở mức tốt theo AQI mới nhất."
+    elif aqi <= 100:
+        comment = "Không khí ở mức trung bình, nên tiếp tục theo dõi."
+    else:
+        comment = "Không khí đang xấu hơn, nên hạn chế hoạt động ngoài trời nếu nhạy cảm."
+
+    return {
+        "city": canonical_city_name(city),
+        "latest": latest,
+        "history": [serialize_row(row, cluster_level=cluster_level) for row in rows],
+        "cluster": cluster_info,
+        "cluster_level": cluster_level,
+        "prediction": prediction,
+        "comment": comment,
+        "note": "AQI dự đoán chỉ là kết quả tham khảo từ Linear Regression.",
     }
 
 
@@ -478,11 +1020,7 @@ def run_auto_crawl_once():
         AUTO_CRAWL_STATUS["running"] = True
         AUTO_CRAWL_STATUS["last_run_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         AUTO_CRAWL_STATUS["last_error"] = None
-        result = run_crawl_job(
-            db,
-            target=AUTO_CRAWL_TARGET,
-            replace_existing=True,
-        )
+        result = run_crawl_job(db, target=AUTO_CRAWL_TARGET, replace_existing=True)
         AUTO_CRAWL_STATUS["last_result"] = result
         if result.get("error"):
             AUTO_CRAWL_STATUS["last_error"] = result["error"]
@@ -495,7 +1033,6 @@ def run_auto_crawl_once():
             "error": str(exc),
             "raw_count": 0,
             "clean_count": 0,
-            "archived_count": 0,
             "deleted_count": 0,
             "inserted_count": 0,
             "replace_existing": True,
@@ -523,9 +1060,7 @@ def ensure_auto_crawl_thread():
 
 
 @app.get("/auto-start")
-def auto_start(
-    interval_seconds: int = Query(AUTO_CRAWL_INTERVAL_SECONDS, ge=300, le=86400),
-):
+def auto_start(interval_seconds: int = Query(AUTO_CRAWL_INTERVAL_SECONDS, ge=300, le=86400)):
     global AUTO_CRAWL_INTERVAL_SECONDS
     AUTO_CRAWL_STATUS["enabled"] = True
     AUTO_CRAWL_STATUS["interval_seconds"] = interval_seconds
@@ -547,328 +1082,7 @@ def auto_status():
 
 @app.get("/auto-once")
 def auto_once():
-    result = run_auto_crawl_once()
-    return result
-
-
-@app.post("/maintenance/nullify-zero-pollutants")
-def nullify_zero_pollutants(db: Session = Depends(get_db)):
-    pollutant_fields = ["pm25", "pm10", "co", "no2", "so2", "o3"]
-    updated = 0
-
-    rows = db.query(models.AirQuality).all()
-    for row in rows:
-        changed = False
-        values = [getattr(row, field) for field in pollutant_fields]
-        zero_count = sum(1 for value in values if value == 0)
-        present_count = sum(1 for value in values if value is not None)
-
-        if row.aqi and zero_count and present_count < len(pollutant_fields):
-            for field in pollutant_fields:
-                if getattr(row, field) == 0:
-                    setattr(row, field, None)
-                    changed = True
-
-        if changed:
-            updated += 1
-
-    db.commit()
-    return {"message": "Zero pollutant cleanup completed", "updated_rows": updated}
-
-
-@app.get("/map")
-def get_map_data(
-    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
-    db: Session = Depends(get_db),
-):
-    rows = crud.get_all_latest_by_city(db, limit=200, max_age_hours=max_age_hours)
-    data_dict = {canonical_city_name(row.city): row for row in rows}
-
-    result = []
-    for profile in CITY_PROFILES:
-        name = profile["name"]
-        row = data_dict.get(name)
-        aqi = float(row.aqi) if row and row.aqi is not None else None
-        result.append(
-            {
-                "city": name,
-                "lat": profile["coords"][0],
-                "lng": profile["coords"][1],
-                "aqi": round(aqi, 2) if aqi is not None else None,
-                "level": aqi_level(aqi) if aqi is not None else "Không có dữ liệu mới",
-                "time": str(row.time) if row else None,
-                "age_hours": row_age_hours(row),
-                "fresh_window_hours": max_age_hours,
-                "has_fresh_data": row is not None,
-            }
-        )
-    return result
-
-
-@app.get("/ranking")
-def ranking(
-    limit: int = Query(10, ge=1, le=50),
-    order: str = Query("desc", pattern="^(asc|desc)$"),
-    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
-    country: str = Query(None),
-    db: Session = Depends(get_db),
-):
-    rows = crud.get_unique_latest(
-        db,
-        limit=200,
-        sort_desc=(order == "desc"),
-        max_age_hours=max_age_hours,
-    )
-    items = []
-    seen = set()
-
-    for row in rows:
-        if country and (row.country or "").lower() != country.lower():
-            continue
-
-        city = canonical_city_name(row.city)
-        if city in seen:
-            continue
-        seen.add(city)
-        aqi = float(row.aqi or 0)
-        items.append({
-            "city": city,
-            "aqi": round(aqi, 2),
-            "level": aqi_level(aqi),
-            "time": str(row.time),
-            "age_hours": row_age_hours(row),
-            "fresh_window_hours": max_age_hours,
-        })
-        if len(items) >= limit:
-            break
-
-    return items
-
-
-@app.get("/city")
-def get_by_city(
-    city: str = Query(...),
-    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
-    db: Session = Depends(get_db),
-):
-    items = []
-    seen = set()
-    for row in crud.get_city_history(db, city, limit=50, max_age_hours=max_age_hours):
-        key = (canonical_city_name(row.city), str(row.time), row.station)
-        if key in seen:
-            continue
-        seen.add(key)
-        items.append(serialize_row(row))
-    return items
-
-
-@app.get("/search")
-def search(
-    city: str = Query(...),
-    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
-    db: Session = Depends(get_db),
-):
-    return get_by_city(city=city, max_age_hours=max_age_hours, db=db)
-
-
-@app.get("/compare")
-def compare(
-    city1: str = Query(...),
-    city2: str = Query(...),
-    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
-    db: Session = Depends(get_db),
-):
-
-    rows = crud.get_unique_latest(db, limit=200, max_age_hours=max_age_hours)
-
-    data = {canonical_city_name(r.city): r for r in rows}
-
-    row1 = data.get(canonical_city_name(city1))
-    row2 = data.get(canonical_city_name(city2))
-
-    if not row1:
-        raise HTTPException(status_code=404, detail=f"City not found: {city1}")
-    if not row2:
-        raise HTTPException(status_code=404, detail=f"City not found: {city2}")
-
-    data1 = serialize_summary(row1)
-    data2 = serialize_summary(row2)
-
-    # Phân tích chi tiết: chỉ số nào city tốt hơn (thấp = tốt)
-    metrics = ["aqi", "pm25", "pm10", "co", "no2", "so2", "o3"]
-    better_at = {}
-    city1_wins = 0
-    city2_wins = 0
-    
-    for metric in metrics:
-        val1 = float(data1[metric]) if data1[metric] is not None else float('inf')
-        val2 = float(data2[metric]) if data2[metric] is not None else float('inf')
-        
-        if val1 <= val2:
-            better_at[metric] = data1["city"]
-            city1_wins += 1
-        else:
-            better_at[metric] = data2["city"]
-            city2_wins += 1
-    
-    # Xác định nhận xét tổng quan
-    if city1_wins > city2_wins:
-        overall = f"{data1['city']} tốt hơn ở {city1_wins}/{len(metrics)} chỉ số"
-    elif city2_wins > city1_wins:
-        overall = f"{data2['city']} tốt hơn ở {city2_wins}/{len(metrics)} chỉ số"
-    else:
-        overall = "Hai thành phố ngang nhau về chất lượng không khí"
-
-    return {
-        "city1": data1,
-        "city2": data2,
-        "difference": {
-            key: (
-                round(abs(float(data1[key]) - float(data2[key])), 2)
-                if data1[key] is not None and data2[key] is not None
-                else None
-            )
-            for key in metrics
-        },
-        "better_at": better_at,
-        "city1_wins": city1_wins,
-        "city2_wins": city2_wins,
-        "overall_recommendation": overall,
-        "note": "Thấp = tốt (AQI, PM2.5, PM10, CO, NO2, SO2, O3 đều tính: giá trị thấp hơn là tốt hơn)",
-    }
-
-@app.get("/summary")
-def summary(
-    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
-    db: Session = Depends(get_db),
-):
-    raw_latest = crud.get_all_latest_by_city(
-        db,
-        limit=200,
-        sort_desc=False,
-        max_age_hours=max_age_hours,
-    )
-    latest = []
-    seen = set()
-
-    for row in raw_latest:
-        city = canonical_city_name(row.city)
-        if city in seen:
-            continue
-        row.city = city
-        seen.add(city)
-        latest.append(row)
-
-    if not latest:
-        return {
-            "message": "No fresh data available",
-            "tracked_city_count": len(CITY_PROFILES),
-            "count_city": 0,
-            "fresh_window_hours": max_age_hours,
-            "avg_aqi": None,
-            "max_aqi": None,
-            "avg_pm25": None,
-            "avg_pm10": None,
-            "avg_so2": None,
-            "best_places": [],
-            "worst_places": [],
-        }
-
-    avg_aqi = average_present(latest, "aqi") or 0
-    avg_pm25 = average_present(latest, "pm25")
-    avg_pm10 = average_present(latest, "pm10")
-    avg_so2 = average_present(latest, "so2")
-    max_aqi = max(float(row.aqi or 0) for row in latest)
-    best = sorted(latest, key=lambda row: float(row.aqi or 0))[:5]
-    worst = sorted(latest, key=lambda row: float(row.aqi or 0), reverse=True)[:5]
-
-    return {
-        "tracked_city_count": len(CITY_PROFILES),
-        "count_city": len(latest),
-        "fresh_window_hours": max_age_hours,
-        "avg_aqi": round(avg_aqi, 2),
-        "max_aqi": round(max_aqi, 2), 
-        "avg_pm25": avg_pm25,
-        "avg_pm10": avg_pm10,
-        "avg_so2": avg_so2,
-        "best_places": [
-            {"city": canonical_city_name(row.city), "aqi": round(float(row.aqi or 0), 2)}
-            for row in best
-        ],
-        "worst_places": [
-            {"city": canonical_city_name(row.city), "aqi": round(float(row.aqi or 0), 2)}
-            for row in worst
-        ],
-    }
-
-
-@app.get("/chart")
-def get_chart(
-    city: str,
-    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
-    db: Session = Depends(get_db),
-):
-    filters = [models.AirQuality.city.ilike(f"%{term}%") for term in city_search_terms(city)]
-    rows = (
-        db.query(models.AirQuality)
-        .filter(or_(*filters))
-        .filter(models.AirQuality.time >= datetime.now() - timedelta(hours=max_age_hours))
-        .order_by(models.AirQuality.time.desc())
-        .limit(20)
-        .all()
-    )
-    rows = distinct_time_series(rows)[:10]
-    return {"labels": [str(row.time) for row in rows], "aqi": [row.aqi for row in rows]}
-
-
-@app.get("/chart_multi")
-def get_chart_multi(
-    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
-    db: Session = Depends(get_db),
-):
-    cutoff = datetime.now() - timedelta(hours=max_age_hours)
-    time_rows = (
-        db.query(models.AirQuality.time)
-        .filter(models.AirQuality.time >= cutoff)
-        .group_by(models.AirQuality.time)
-        .order_by(models.AirQuality.time.desc())
-        .limit(10)
-        .all()
-    )
-    labels = [str(row.time) for row in reversed(time_rows)]
-    result = {}
-
-    for profile in CITY_PROFILES:
-        terms = city_search_terms(profile["name"])
-        rows = (
-            db.query(models.AirQuality)
-            .filter(or_(*[models.AirQuality.city.ilike(f"%{term}%") for term in terms]))
-            .filter(models.AirQuality.time >= cutoff)
-            .order_by(models.AirQuality.time.desc())
-            .limit(20)
-            .all()
-        )
-        time_map = {str(row.time): row.aqi for row in rows}
-        result[profile["name"]] = {"labels": labels, "aqi": [time_map.get(label) for label in labels]}
-
-    return result
-
-
-@app.get("/cluster")
-def cluster(
-    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
-    db: Session = Depends(get_db),
-):
-    return cluster_data(db, max_age_hours=max_age_hours)
-
-
-@app.get("/predict")
-def predict(
-    city: str = Query(None),
-    max_age_hours: int = Query(CURRENT_DATA_MAX_AGE_HOURS, ge=1, le=720),
-    db: Session = Depends(get_db),
-):
-    return predict_aqi(db, city=city, max_age_hours=max_age_hours)
+    return run_auto_crawl_once()
 
 
 @app.on_event("startup")

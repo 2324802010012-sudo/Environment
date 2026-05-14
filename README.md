@@ -1,387 +1,125 @@
 # Hệ thống thu thập, lưu trữ, tìm kiếm và xếp hạng chất lượng không khí
 
-## 1. Giới thiệu đề tài
+Đề tài môn **Kĩ thuật lập trình trong phân tích dữ liệu**.
 
-Ô nhiễm không khí là một vấn đề môi trường có ảnh hưởng trực tiếp đến sức khỏe cộng đồng, đặc biệt tại các đô thị lớn. Các chỉ số như AQI, PM2.5, PM10, CO, NO2, SO2 và O3 thường được sử dụng để đánh giá mức độ ô nhiễm và hỗ trợ người dân đưa ra quyết định trong sinh hoạt hằng ngày.
+Hệ thống dùng FastAPI, MySQL, SQLAlchemy ORM, Pandas, scikit-learn, Chart.js và Leaflet để xây dựng pipeline:
 
-Dự án này xây dựng một hệ thống web có khả năng thu thập dữ liệu chất lượng không khí trực tiếp từ Internet, tiền xử lý dữ liệu, lưu trữ vào MySQL, cung cấp API truy vấn và hiển thị trực quan trên dashboard. Hệ thống cũng có thêm chức năng phân nhóm ô nhiễm bằng KMeans và dự đoán AQI bằng Linear Regression.
+```text
+Open-Meteo Air Quality API
+-> requests crawler
+-> Pandas clean/normalize
+-> MySQL store
+-> FastAPI search/ranking/compare/map/chart
+-> KMeans + Linear Regression
+-> HTML dashboard
+```
 
-Nguồn dữ liệu duy nhất của hệ thống là **Open-Meteo Air Quality API**:
+Nguồn dữ liệu chính và duy nhất là Open-Meteo Air Quality API:
 
 ```text
 https://open-meteo.com/en/docs/air-quality-api
 ```
 
-Hệ thống không sử dụng dataset tải sẵn như CSV/Kaggle. Toàn bộ dữ liệu được lấy trực tiếp bằng code thông qua thư viện `requests`.
+Project không dùng dataset có sẵn như Kaggle/CSV tải sẵn, không scrape HTML và không tạo dữ liệu giả.
 
-## 2. Phạm vi và mục tiêu
+## Chức năng chính
 
-### 2.1. Phạm vi dữ liệu
+- Crawl dữ liệu AQI, PM2.5, PM10, CO, NO2, SO2, O3 theo danh sách thành phố trong `backend/services/cities.py`.
+- Chỉ lưu bản ghi hiện tại hoặc hourly đã xảy ra, không lưu mốc tương lai.
+- Có timeout, retry, giới hạn số worker và khoảng nghỉ nhỏ giữa request.
+- Làm sạch dữ liệu bằng Pandas, giữ `NULL` nếu thiếu chỉ số, không biến thiếu dữ liệu thành 0.
+- Lưu MySQL với chống trùng theo `city + observed_time + station`.
+- Tìm kiếm nâng cao theo thành phố, quốc gia, thời gian, AQI, mức AQI, chỉ số ô nhiễm, sort và limit.
+- Xếp hạng theo AQI, PM2.5, PM10, CO, NO2, SO2, O3 hoặc điểm ô nhiễm tổng hợp.
+- So sánh hai thành phố theo bản ghi mới nhất, AQI trung bình và lịch sử AQI.
+- Dashboard gồm tổng quan, crawl mới, tìm kiếm, ranking, biểu đồ, bản đồ, compare, KMeans và dự đoán AQI.
+- KMeans phân cụm thành phố thành `low`, `medium`, `high`.
+- Linear Regression dự đoán AQI tham khảo từ PM2.5, PM10, CO, NO2, SO2, O3.
 
-- Khu vực theo dõi: 108 địa điểm, gồm 93 thành phố/khu vực tại Việt Nam và 15 thành phố nước ngoài.
-- Dữ liệu lấy theo tọa độ latitude/longitude của từng địa điểm.
-- Chỉ số thu thập:
-  - AQI
-  - PM2.5
-  - PM10
-  - CO
-  - NO2
-  - SO2
-  - O3
-
-Nhóm thành phố nước ngoài bổ sung:
-
-```text
-Bangkok, Singapore, Kuala Lumpur, Jakarta, Manila,
-Phnom Penh, Vientiane, Yangon, Beijing, Shanghai,
-Hong Kong, Tokyo, Seoul, Taipei, New Delhi
-```
-
-Việc bổ sung các thành phố nước ngoài giúp mỗi lần crawl có nhiều địa điểm hơn, hỗ trợ mục tiêu lấy khoảng 1500 bản ghi raw từ Open-Meteo.
-
-### 2.2. Mục tiêu hệ thống
-
-- Tự động thu thập dữ liệu chất lượng không khí từ Open-Meteo.
-- Làm sạch và chuẩn hóa dữ liệu bằng Pandas.
-- Lưu dữ liệu vào MySQL.
-- Chống trùng dữ liệu theo `city + time + station`.
-- Cung cấp REST API bằng FastAPI.
-- Hiển thị dashboard gồm xếp hạng, bản đồ, biểu đồ, tìm kiếm, so sánh, phân cụm và dự đoán.
-- Có cơ chế auto crawl theo chu kỳ.
-- Có hướng dẫn kiểm tra tính đúng của dữ liệu trong MySQL.
-
-## 3. Những phần nên bỏ và đã bỏ
-
-Trong quá trình rà soát, hệ thống cũ có một số phần không còn phù hợp với hướng triển khai hiện tại.
-
-Đã bỏ:
-
-- `backend/services/crawler.py`: crawler WAQI/IQAir cũ.
-- `backend/schemas.py`: schema Pydantic cũ không còn được import và thiếu các cột mới như `country`, `station`, `so2`.
-- Nhánh `use_backup`, `use_html`, `max_terms`, `max_stations` trong endpoint `/crawl`.
-- Phụ thuộc `beautifulsoup4` trong `requirements.txt`.
-- Mô tả backup WAQI/IQAir trong README.
-- Hướng dẫn SQLite, vì hệ thống hiện chỉ dùng MySQL.
-
-Lý do bỏ:
-
-- Đề tài đã chốt nguồn chính là Open-Meteo Air Quality API.
-- Dùng một nguồn duy nhất giúp luồng dữ liệu rõ ràng, dễ thuyết minh và dễ kiểm chứng.
-- Không scrape HTML nên tránh phụ thuộc cấu trúc giao diện website.
-- Giảm rủi ro vi phạm chính sách nền tảng.
-- Giảm độ phức tạp khi chạy demo và bảo vệ bài.
-
-Các phần được giữ:
-
-- `crawler_openmeteo.py`: crawler chính.
-- `data_loader.py`: tiền xử lý dữ liệu.
-- `crud.py`, `models.py`, `database.py`: lưu trữ MySQL.
-- `ml.py`: phân cụm KMeans.
-- `predict.py`: dự đoán AQI.
-- `robots_checker.py`: báo cáo tuân thủ và nguồn dữ liệu.
-- `index.html`: dashboard.
-
-## 4. Kiến trúc tổng thể
+## Cấu trúc project
 
 ```text
-Open-Meteo Air Quality API
-        |
-        | requests
-        v
-backend/services/crawler_openmeteo.py
-        |
-        | raw records
-        v
-backend/services/data_loader.py
-        |
-        | clean records
-        v
-backend/crud.py + backend/models.py
-        |
-        | SQLAlchemy ORM
-        v
-MySQL: air_quality.air_quality
-        |
-        v
-FastAPI endpoints: backend/main.py
-        |
-        v
-Dashboard: index.html
+backend/
+  main.py
+  database.py
+  models.py
+  crud.py
+  services/
+    aqi.py
+    cities.py
+    crawler_openmeteo.py
+    data_loader.py
+    ml.py
+    predict.py
+    robots_checker.py
+index.html
+requirements.txt
+.env.example
+.gitignore
+README.md
 ```
 
-Hệ thống có 3 lớp chính:
+## Cài đặt
 
-1. **Data pipeline**: thu thập, tiền xử lý, lưu trữ.
-2. **Backend API**: cung cấp dữ liệu và chức năng phân tích.
-3. **Frontend dashboard**: hiển thị dữ liệu cho người dùng.
+Tạo virtual environment nếu cần:
 
-## 5. Cấu trúc thư mục
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Tạo file `.env` từ mẫu `.env.example` và sửa mật khẩu MySQL:
 
 ```text
-DA_MoiTruong/
-├── backend/
-│   ├── __init__.py
-│   ├── main.py
-│   ├── database.py
-│   ├── models.py
-│   ├── crud.py
-│   └── services/
-│       ├── aqi.py
-│       ├── cities.py
-│       ├── crawler_openmeteo.py
-│       ├── data_loader.py
-│       ├── ml.py
-│       ├── predict.py
-│       └── robots_checker.py
-├── index.html
-├── requirements.txt
-└── README.md
+DATABASE_URL=mysql+pymysql://root:your_password@localhost:3306/air_quality?charset=utf8mb4
+AUTO_CRAWL_ENABLED=false
+CURRENT_DATA_MAX_AGE_HOURS=48
+OPEN_METEO_MAX_WORKERS=6
 ```
 
-### Vai trò từng file chính
+Không commit file `.env` vì có thể chứa mật khẩu thật.
 
-| File | Vai trò |
+## Tạo database MySQL
+
+```sql
+CREATE DATABASE air_quality
+CHARACTER SET utf8mb4
+COLLATE utf8mb4_unicode_ci;
+```
+
+Backend tự gọi `create_all()` và có lớp migration nhỏ khi khởi động để bổ sung các cột còn thiếu. Schema chính của bảng `air_quality`:
+
+| Cột | Ý nghĩa |
 |---|---|
-| `backend/main.py` | Khởi tạo FastAPI, định nghĩa endpoint, auto crawl |
-| `backend/database.py` | Kết nối MySQL bằng SQLAlchemy |
-| `backend/models.py` | Định nghĩa bảng `air_quality` |
-| `backend/crud.py` | Insert dữ liệu, truy vấn ranking, history, summary |
-| `backend/services/crawler_openmeteo.py` | Thu thập dữ liệu từ Open-Meteo |
-| `backend/services/data_loader.py` | Làm sạch dữ liệu bằng Pandas |
-| `backend/services/cities.py` | Danh sách 93 địa điểm Việt Nam và 15 thành phố nước ngoài |
-| `backend/services/aqi.py` | Hàm tính AQI fallback từ PM2.5/PM10 |
-| `backend/services/ml.py` | Phân nhóm ô nhiễm bằng KMeans |
-| `backend/services/predict.py` | Dự đoán AQI bằng Linear Regression |
-| `backend/services/robots_checker.py` | Báo cáo nguồn dữ liệu và tuân thủ |
-| `index.html` | Dashboard HTML/CSS/JavaScript |
+| `id` | Khóa chính |
+| `city`, `country` | Thành phố và quốc gia |
+| `latitude`, `longitude` | Tọa độ |
+| `observed_time` | Thời gian dữ liệu được Open-Meteo ghi nhận |
+| `collected_at` | Thời điểm hệ thống crawl/lưu dữ liệu |
+| `pm25`, `pm10`, `co`, `no2`, `so2`, `o3` | Chỉ số ô nhiễm |
+| `aqi` | US AQI từ Open-Meteo |
+| `station` | Nguồn bản ghi: `open_meteo` hoặc `open_meteo_hourly` |
 
-## 6. Công nghệ đã áp dụng
+Nếu database đã có schema cũ, backend sẽ tự thêm an toàn:
 
-Hệ thống sử dụng các công nghệ chính sau:
-
-| Nhóm công nghệ | Công nghệ/thư viện | Vai trò trong hệ thống |
-|---|---|---|
-| Ngôn ngữ lập trình | Python | Xây dựng backend, crawler, xử lý dữ liệu và học máy |
-| Web backend | FastAPI | Xây dựng REST API cho crawl, ranking, map, chart, compare, cluster, predict |
-| ASGI server | Uvicorn | Chạy ứng dụng FastAPI trên local server |
-| Thu thập dữ liệu | `requests` | Gửi HTTP request đến Open-Meteo Air Quality API |
-| Nguồn dữ liệu | Open-Meteo Air Quality API | Cung cấp dữ liệu AQI, PM2.5, PM10, CO, NO2, SO2, O3 |
-| Tiền xử lý dữ liệu | Pandas | Chuyển raw records thành DataFrame, ép kiểu, lọc AQI, chuẩn hóa dữ liệu, bỏ trùng |
-| ORM | SQLAlchemy | Ánh xạ bảng MySQL thành model Python và thao tác insert/query |
-| CSDL | MySQL | Lưu trữ dữ liệu chất lượng không khí |
-| Driver MySQL | PyMySQL | Kết nối SQLAlchemy với MySQL |
-| Học máy | scikit-learn | KMeans phân nhóm ô nhiễm, Linear Regression dự đoán AQI |
-| Kiểm tra nguồn | `urllib.robotparser` | Kiểm tra/báo cáo robots.txt trong endpoint compliance |
-| Frontend | HTML, CSS, JavaScript | Xây dựng giao diện dashboard |
-| Biểu đồ | Chart.js | Vẽ biểu đồ AQI theo thời gian |
-| Bản đồ | Leaflet | Hiển thị AQI trên bản đồ |
-
-### 6.1. Mức độ đáp ứng yêu cầu thư viện
-
-Yêu cầu đề tài nhấn mạnh sinh viên vận dụng `requests`, BeautifulSoup, Selenium hoặc API, kết hợp CSDL và Pandas. Phiên bản cuối của hệ thống chọn hướng **API chính thức + requests** thay vì scrape HTML.
-
-| Yêu cầu | Trạng thái | Ghi chú |
-|---|---|---|
-| `requests` | Đã dùng | Gọi Open-Meteo Air Quality API |
-| API | Đã dùng | Nguồn chính và duy nhất là Open-Meteo API |
-| Pandas | Đã dùng | Tiền xử lý dữ liệu trong `data_loader.py` |
-| MySQL | Đã dùng | Lưu dữ liệu vào schema `air_quality` |
-| BeautifulSoup | Không dùng trong bản cuối | Không cần scrape HTML vì đã có API công khai, ổn định |
-| Selenium | Không dùng | Không cần điều khiển trình duyệt vì không thu thập dữ liệu động từ website |
-| SQLite | Không dùng | Project đã chốt chỉ dùng MySQL để lưu dữ liệu |
-
-Việc không dùng BeautifulSoup/Selenium là có chủ đích. Vì Open-Meteo cung cấp API công khai, dùng API giúp hệ thống hợp pháp hơn, ổn định hơn và ít phụ thuộc giao diện website hơn so với scraping HTML.
-
-## 7. Luồng thu thập dữ liệu
-
-### 7.1. Nguồn dữ liệu
-
-Crawler chính nằm tại:
-
-```text
-backend/services/crawler_openmeteo.py
+```sql
+ALTER TABLE air_quality ADD COLUMN latitude FLOAT NULL;
+ALTER TABLE air_quality ADD COLUMN longitude FLOAT NULL;
+ALTER TABLE air_quality ADD COLUMN observed_time DATETIME NULL;
+ALTER TABLE air_quality ADD COLUMN collected_at DATETIME NULL;
+UPDATE air_quality SET observed_time = time WHERE observed_time IS NULL AND time IS NOT NULL;
+UPDATE air_quality SET collected_at = NOW() WHERE collected_at IS NULL;
 ```
 
-Endpoint Open-Meteo đang dùng:
+Bảng `air_quality` dùng cho dữ liệu hiện hành để dashboard truy vấn nhanh. Bảng `air_quality_history` dùng để lưu lịch sử các lần crawl, giúp kiểm tra và mở rộng phân tích sau này.
 
-```text
-https://air-quality-api.open-meteo.com/v1/air-quality
-```
+## Chạy backend
 
-Ví dụ request cho Hà Nội:
-
-```text
-https://air-quality-api.open-meteo.com/v1/air-quality?latitude=21.03&longitude=105.85&current=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi&hourly=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi&timezone=Asia/Ho_Chi_Minh&past_days=2&forecast_days=1
-```
-
-### 7.2. Tham số request
-
-| Tham số | Ý nghĩa |
-|---|---|
-| `latitude` | Vĩ độ địa điểm |
-| `longitude` | Kinh độ địa điểm |
-| `current` | Lấy dữ liệu hiện tại |
-| `hourly` | Lấy dữ liệu theo giờ |
-| `timezone=Asia/Ho_Chi_Minh` | Đồng bộ thời gian API theo múi giờ Việt Nam để lọc dữ liệu hiện hành ổn định |
-| `past_days=2` | Lấy dữ liệu gần đây |
-| `forecast_days=1` | API có thể trả thêm mốc dự báo, nhưng hệ thống không lưu mốc tương lai |
-
-### 7.3. Chỉ lưu số liệu đã xảy ra
-
-Open-Meteo có thể trả các mốc giờ dự báo. Để dữ liệu trong MySQL phản ánh số liệu tại thời điểm thu thập, hệ thống chỉ lưu:
-
-- Bản ghi `current`.
-- Bản ghi `hourly` có `time <= thời điểm hiện tại`.
-
-Các mốc giờ tương lai bị bỏ qua.
-
-### 7.4. Cấu trúc record sau crawl
-
-Mỗi bản ghi raw được chuẩn hóa về dạng:
-
-```python
-{
-    "city": "Hà Nội",
-    "country": "Vietnam",
-    "time": datetime(...),
-    "station": "open_meteo_hourly",
-    "aqi": 75,
-    "pm25": 20.1,
-    "pm10": 35.4,
-    "co": 180.0,
-    "no2": 12.0,
-    "so2": 4.0,
-    "o3": 55.0
-}
-```
-
-`station` là nhãn nguồn dữ liệu:
-
-- `open_meteo`: dữ liệu hiện tại.
-- `open_meteo_hourly`: dữ liệu theo giờ.
-
-### 7.5. Số lượng mỗi lần crawl
-
-Endpoint:
-
-```text
-GET /crawl?target=1500&replace_existing=true
-```
-
-nghĩa là hệ thống cố gắng lấy khoảng 1500 bản ghi raw từ Open-Meteo. Mặc định `replace_existing=true`, nên mỗi lần crawl thành công sẽ refresh bảng dữ liệu:
-
-- Chỉ xóa dữ liệu cũ sau khi đã lấy và clean được dữ liệu mới hợp lệ.
-- Xóa các bản ghi cũ trong bảng `air_quality`.
-- Lưu bộ dữ liệu mới vừa lấy từ Open-Meteo.
-- Nếu API lỗi hoặc không có dữ liệu hợp lệ, dữ liệu cũ vẫn được giữ lại.
-- Nếu muốn giữ dữ liệu cũ và chỉ insert thêm, gọi `GET /crawl?target=1500&replace_existing=false`.
-
-Cần phân biệt:
-
-| Trường | Ý nghĩa |
-|---|---|
-| `raw_count` | Số bản ghi lấy từ API |
-| `clean_count` | Số bản ghi hợp lệ sau tiền xử lý |
-| `deleted_count` | Số bản ghi cũ đã xóa trước khi lưu dữ liệu mới |
-| `inserted_count` | Số bản ghi mới lưu vào MySQL |
-| `replace_existing` | Cho biết lần crawl có thay thế toàn bộ dữ liệu cũ hay không |
-
-Với chế độ mặc định, `inserted_count` là số bản ghi của bộ dữ liệu mới sau khi đã refresh bảng.
-
-Khuyến nghị: crawl khoảng **1 giờ/lần**, phù hợp với dữ liệu hourly.
-
-## 8. Luồng tiền xử lý dữ liệu
-
-File xử lý:
-
-```text
-backend/services/data_loader.py
-```
-
-Các bước:
-
-1. Chuyển list records thành Pandas DataFrame.
-2. Đảm bảo đủ cột:
-
-```text
-city, country, time, station, pm25, pm10, co, no2, so2, o3, aqi
-```
-
-3. Loại dòng không có AQI.
-4. Ép AQI về dạng số.
-5. Giữ AQI trong khoảng `0-500`.
-6. Chuẩn hóa tên thành phố.
-7. Chuẩn hóa thời gian.
-8. Ép kiểu số cho các chất ô nhiễm.
-9. Loại bản ghi trùng theo:
-
-```text
-city + time + station
-```
-
-## 9. Luồng lưu trữ MySQL
-
-### 9.1. Cấu hình kết nối
-
-File:
-
-```text
-backend/database.py
-```
-
-Cấu hình:
-
-```python
-DATABASE_URL = "mysql+pymysql://root:123456@localhost:3306/air_quality"
-```
-
-Project chỉ dùng MySQL để lưu dữ liệu.
-
-### 9.2. Bảng dữ liệu
-
-Bảng:
-
-```text
-air_quality.air_quality
-```
-
-Các cột:
-
-| Cột | Kiểu | Ý nghĩa |
-|---|---|---|
-| `id` | Integer | Khóa chính |
-| `city` | String | Tên thành phố/khu vực |
-| `country` | String | Quốc gia |
-| `time` | DateTime | Thời gian ghi nhận |
-| `pm25` | Float | PM2.5 |
-| `pm10` | Float | PM10 |
-| `co` | Float | CO |
-| `no2` | Float | NO2 |
-| `so2` | Float | SO2 |
-| `o3` | Float | O3 |
-| `aqi` | Float | Chỉ số AQI |
-| `station` | String | Nguồn dữ liệu |
-
-Ràng buộc chống trùng:
-
-```text
-UNIQUE(city, time, station)
-```
-
-Khi server khởi động, `main.py` tự gọi `create_all()`. Nếu bảng cũ thiếu `country` hoặc `so2`, hệ thống tự bổ sung cột bằng `ALTER TABLE`.
-
-## 10. Luồng API backend
-
-Backend dùng FastAPI. Chạy server:
+Từ thư mục gốc project:
 
 ```bash
 uvicorn backend.main:app --reload
-```
-
-Hoặc nếu terminal đang ở thư mục `backend`:
-
-```bash
-uvicorn main:app --reload
 ```
 
 API docs:
@@ -390,406 +128,9 @@ API docs:
 http://127.0.0.1:8000/docs
 ```
 
-### Danh sách endpoint
+## Chạy frontend
 
-| Endpoint | Chức năng |
-|---|---|
-| `GET /` | Kiểm tra server |
-| `GET /compliance` | Mô tả nguồn dữ liệu và pipeline |
-| `GET /cities` | Danh sách 108 địa điểm theo dõi |
-| `GET /source-url?city=Hanoi` | Trả link Open-Meteo API gốc để đối chiếu dữ liệu |
-| `GET /crawl?target=1500&replace_existing=true` | Crawl Open-Meteo, clean, xóa dữ liệu cũ và lưu dữ liệu mới |
-| `GET /crawl-openmeteo?target=1500` | Crawl riêng Open-Meteo |
-| `GET /ranking?limit=10&order=desc&max_age_hours=48` | Xếp hạng AQI theo dữ liệu còn mới |
-| `GET /map?max_age_hours=48` | Dữ liệu bản đồ theo dữ liệu còn mới |
-| `GET /summary?max_age_hours=48` | Tổng hợp dữ liệu hiện hành |
-| `GET /city?city=Hanoi&max_age_hours=48` | Lịch sử gần đây của một thành phố |
-| `GET /search?city=Hanoi&max_age_hours=48` | Tìm kiếm thành phố trong dữ liệu gần đây |
-| `GET /compare?city1=Hanoi&city2=Da Nang&max_age_hours=48` | So sánh hai thành phố bằng dữ liệu còn mới |
-| `GET /chart?city=Hanoi&max_age_hours=48` | Dữ liệu biểu đồ gần đây của một thành phố |
-| `GET /chart_multi?max_age_hours=48` | Dữ liệu biểu đồ gần đây của nhiều thành phố |
-| `GET /cluster?max_age_hours=48` | Phân nhóm ô nhiễm bằng KMeans trên dữ liệu hiện hành |
-| `GET /predict?max_age_hours=48` | Dự đoán AQI |
-| `GET /predict?city=Hanoi&max_age_hours=48` | Dự đoán AQI cho một thành phố bằng input mới |
-| `GET /auto-status` | Trạng thái auto crawl |
-| `GET /auto-start?interval_seconds=3600` | Bật auto crawl |
-| `GET /auto-stop` | Tắt auto crawl |
-| `GET /auto-once` | Crawl một lần ngay lập tức |
-
-## 11. Logic các chức năng phân tích
-
-### 11.1. Xếp hạng AQI
-
-Endpoint:
-
-```text
-GET /ranking?limit=10&order=desc&max_age_hours=48
-```
-
-Logic:
-
-1. Chỉ lấy các bản ghi nằm trong cửa sổ dữ liệu mới, mặc định `max_age_hours=48`.
-2. Trong nhóm dữ liệu còn mới, lấy bản ghi mới nhất của từng thành phố trong MySQL.
-3. Chuẩn hóa tên thành phố.
-4. Loại thành phố trùng trong response.
-5. Sắp xếp theo AQI.
-
-Ý nghĩa:
-
-- `order=desc`: AQI cao nhất đứng đầu, tức ô nhiễm nặng hơn.
-- `order=asc`: AQI thấp nhất đứng đầu, tức không khí tốt hơn.
-
-Hệ thống mặc định dùng `max_age_hours=48` để tránh lỗi so sánh dữ liệu mới với dữ liệu cũ. Nếu một thành phố không có dữ liệu trong 48 giờ gần nhất, thành phố đó không được đưa vào bảng xếp hạng hiện hành. Có thể tăng tham số này, ví dụ `max_age_hours=168`, khi muốn xem dữ liệu trong 7 ngày gần nhất.
-
-### 11.2. Bản đồ
-
-Endpoint:
-
-```text
-GET /map
-```
-
-Logic:
-
-- Lấy dữ liệu AQI mới nhất theo thành phố trong cửa sổ dữ liệu còn mới, mặc định 48 giờ.
-- Ghép với tọa độ trong `CITY_PROFILES`.
-- Frontend dùng Leaflet để vẽ marker trên bản đồ.
-- Thành phố không có dữ liệu mới vẫn có marker nhưng được đánh dấu không có dữ liệu hiện hành.
-
-### 11.2.1. Quy tắc dữ liệu hiện hành
-
-Các chức năng `ranking`, `map`, `summary`, `city`, `search`, `compare`, `chart`, `chart_multi`, `cluster` và `predict` đều dùng tham số `max_age_hours`, mặc định là `48`.
-
-Ý nghĩa:
-
-- Chỉ dùng dữ liệu có thời gian đo nằm trong 48 giờ gần nhất.
-- Không trộn bản ghi cũ với bản ghi mới khi xếp hạng hoặc so sánh.
-- Nếu Open-Meteo chưa có dữ liệu mới cho một địa điểm, hệ thống không giả lập số liệu mà trả về thiếu dữ liệu.
-- Có thể thay đổi bằng biến môi trường `CURRENT_DATA_MAX_AGE_HOURS` hoặc truyền trực tiếp query param `max_age_hours`.
-
-Ví dụ:
-
-```text
-GET /ranking?limit=10&order=desc&max_age_hours=48
-GET /summary?max_age_hours=48
-GET /compare?city1=Hà Nội&city2=Đà Nẵng&max_age_hours=48
-```
-
-### 11.2.2. Quy tắc chống sai lệch dữ liệu thực tế
-
-Để dữ liệu hiển thị không bị sai logic thực tế, hệ thống áp dụng thêm các nguyên tắc sau:
-
-- Crawler luôn quét hết danh sách thành phố thay vì dừng ngay khi vừa đủ `target_records`. Điều này tránh tình trạng dữ liệu bị lệch về các thành phố phản hồi API nhanh hơn.
-- AQI được lấy trực tiếp từ `us_aqi` của Open-Meteo. Nếu API thiếu AQI, bản ghi đó bị loại, không tự tạo AQI giả bằng công thức nội bộ.
-- Nếu bản ghi `current` và `hourly` trùng cùng thành phố và cùng mốc giờ, hệ thống ưu tiên bản ghi `current`.
-- Khi truy vấn dữ liệu mới nhất, hệ thống gộp trùng theo thành phố và ưu tiên `open_meteo` hơn `open_meteo_hourly`.
-- Bản đồ không tô màu xanh cho thành phố thiếu dữ liệu mới; các điểm thiếu dữ liệu được hiển thị màu xám.
-- KMeans phân nhóm theo bản ghi hiện hành mới nhất của từng thành phố trong cửa sổ `max_age_hours`, không lấy trung bình toàn bộ lịch sử cũ.
-
-### 11.2.3. Nguồn đối chiếu khi demo
-
-Hệ thống có endpoint:
-
-```text
-GET /source-url?city=Hanoi
-```
-
-Endpoint này không lưu thêm dữ liệu và không thay đổi pipeline chính. Nó chỉ trả về link Open-Meteo Air Quality API tương ứng với tọa độ thành phố đang chọn. Khi demo, có thể bấm nút **Mở nguồn** trên giao diện để mở trực tiếp dữ liệu gốc từ Open-Meteo và đối chiếu với dữ liệu đang hiển thị trong hệ thống.
-
-Lưu ý: đây là nguồn đối chiếu cùng hệ với nguồn chính Open-Meteo, không phải nguồn phụ để trộn dữ liệu vào MySQL. Cách này giúp demo minh bạch mà vẫn giữ logic dữ liệu nhất quán.
-
-### 11.3. Tóm tắt
-
-Endpoint:
-
-```text
-GET /summary
-```
-
-Trả về:
-
-- Tổng số thành phố/khu vực hệ thống theo dõi.
-- Số thành phố/khu vực đã có dữ liệu trong MySQL.
-- Số thành phố có dữ liệu.
-- AQI trung bình.
-- PM2.5 trung bình.
-- PM10 trung bình.
-- SO2 trung bình.
-- Top 5 nơi tốt nhất.
-- Top 5 nơi ô nhiễm cao nhất.
-
-Lưu ý: hệ thống theo dõi 108 địa điểm trong `CITY_PROFILES`, gồm 93 địa điểm Việt Nam và 15 thành phố nước ngoài. Tuy nhiên số địa điểm đã có dữ liệu trong MySQL có thể thấp hơn 108 nếu chưa crawl đủ, dữ liệu API bị thiếu tại một số tọa độ, hoặc database đang chứa dữ liệu cũ trước khi chuẩn hóa lại tên thành phố. Endpoint `/summary` trả cả `tracked_city_count` và `count_city` để phân biệt hai khái niệm này.
-
-### 11.4. Tìm kiếm và lịch sử
-
-Endpoint:
-
-```text
-GET /city?city=Hanoi
-GET /search?city=Hanoi
-```
-
-Logic:
-
-- Dùng `city_search_terms()` để hỗ trợ tên có dấu, không dấu, alias.
-- Trả lịch sử mới nhất của thành phố.
-
-### 11.5. So sánh hai thành phố
-
-Endpoint:
-
-```text
-GET /compare?city1=Hanoi&city2=Da Nang
-```
-
-Logic:
-
-- Lấy bản ghi mới nhất của từng thành phố.
-- So sánh AQI, PM2.5, PM10, CO, NO2, SO2, O3.
-- Xác định thành phố có AQI thấp hơn là nơi có chất lượng không khí tốt hơn.
-
-### 11.6. Biểu đồ
-
-Endpoint:
-
-```text
-GET /chart?city=Hanoi
-GET /chart_multi
-```
-
-Logic:
-
-- `/chart`: lấy chuỗi AQI theo thời gian cho một thành phố.
-- `/chart_multi`: lấy chuỗi AQI gần nhất cho nhiều thành phố.
-- Frontend dùng Chart.js để vẽ line chart.
-
-## 12. Phân nhóm ô nhiễm bằng KMeans
-
-Endpoint:
-
-```text
-GET /cluster
-```
-
-File:
-
-```text
-backend/services/ml.py
-```
-
-KMeans dùng dữ liệu thật trong MySQL, không dùng dữ liệu giả lập.
-
-Quy trình:
-
-1. Truy vấn bảng `air_quality`.
-2. Tính trung bình theo từng thành phố cho:
-
-```text
-pm25, pm10, co, no2, so2, o3, aqi
-```
-
-3. Dùng các chất ô nhiễm làm feature:
-
-```text
-pm25, pm10, co, no2, so2, o3
-```
-
-4. Điền giá trị thiếu bằng median của từng cột để tránh biến thiếu dữ liệu thành ô nhiễm bằng 0.
-5. Chuẩn hóa feature bằng `StandardScaler`.
-6. Chạy:
-
-```python
-KMeans(n_clusters=3, random_state=42, n_init=10)
-```
-
-7. Sắp xếp cụm theo AQI trung bình:
-
-```text
-AQI thấp nhất  -> low
-AQI giữa      -> medium
-AQI cao nhất  -> high
-```
-
-Lưu ý: KMeans là phân nhóm tương đối theo dữ liệu đang có trong MySQL, không phải bảng phân loại AQI chính thức.
-
-### 12.1. Ý nghĩa phần học máy KMeans
-
-KMeans được áp dụng để hỗ trợ phân tích tổng quan mức độ ô nhiễm giữa các thành phố. Thay vì chỉ xem từng chỉ số riêng lẻ, thuật toán gom các thành phố có đặc điểm ô nhiễm gần giống nhau vào cùng một nhóm.
-
-Dữ liệu đầu vào của KMeans là dữ liệu thật đã được crawl từ Open-Meteo và lưu trong MySQL. Hệ thống không dùng dữ liệu mẫu hay dữ liệu sinh ngẫu nhiên. Trước khi đưa vào mô hình, hệ thống tính giá trị trung bình theo từng thành phố để mỗi thành phố có một vector đặc trưng đại diện.
-
-Vector đặc trưng gồm:
-
-```text
-PM2.5, PM10, CO, NO2, SO2, O3
-```
-
-Các chỉ số này có đơn vị và thang đo khác nhau. Ví dụ CO có thể có giá trị lớn hơn nhiều so với SO2 hoặc NO2. Vì vậy hệ thống dùng `StandardScaler` để chuẩn hóa dữ liệu trước khi chạy KMeans. Nếu không chuẩn hóa, chỉ số có giá trị lớn sẽ ảnh hưởng quá mạnh đến kết quả phân cụm.
-
-Sau khi chạy KMeans, mô hình trả về 3 cụm. Tuy nhiên, mã cụm ban đầu chỉ là số kỹ thuật như `0`, `1`, `2`, chưa có ý nghĩa tốt/xấu. Vì vậy hệ thống tính AQI trung bình của từng cụm và gán nhãn:
-
-```text
-Cụm có AQI trung bình thấp nhất  -> low
-Cụm có AQI trung bình ở giữa    -> medium
-Cụm có AQI trung bình cao nhất  -> high
-```
-
-Nhờ vậy, kết quả phân nhóm dễ hiểu hơn trên dashboard:
-
-- `low`: nhóm thành phố có mức ô nhiễm tương đối thấp hơn trong dữ liệu hiện có.
-- `medium`: nhóm ô nhiễm trung bình.
-- `high`: nhóm thành phố có mức ô nhiễm tương đối cao hơn.
-
-KMeans trong hệ thống có vai trò hỗ trợ phân tích và trực quan hóa. Nó không thay thế quy chuẩn AQI chính thức, mà giúp người dùng nhìn nhanh các nhóm thành phố có đặc điểm ô nhiễm tương đồng.
-
-## 13. Dự đoán AQI bằng Linear Regression
-
-Endpoint:
-
-```text
-GET /predict
-GET /predict?city=Hanoi
-```
-
-File:
-
-```text
-backend/services/predict.py
-```
-
-Mô hình dùng:
-
-```text
-pm25, pm10, co, no2, so2, o3
-```
-
-để dự đoán:
-
-```text
-aqi
-```
-
-Nếu dữ liệu trong MySQL ít hơn 20 dòng, hệ thống trả:
-
-```json
-{
-  "predicted_aqi": 0,
-  "message": "Not enough data"
-}
-```
-
-### 13.1. Ý nghĩa phần học máy Linear Regression
-
-Linear Regression được dùng để ước lượng AQI dựa trên các chất ô nhiễm đã thu thập. Khác với KMeans là bài toán không giám sát, Linear Regression là mô hình có giám sát vì dữ liệu huấn luyện có cả đầu vào và đầu ra.
-
-Đầu vào của mô hình:
-
-```text
-PM2.5, PM10, CO, NO2, SO2, O3
-```
-
-Đầu ra cần dự đoán:
-
-```text
-AQI
-```
-
-Quy trình hoạt động:
-
-1. Đọc dữ liệu từ bảng `air_quality` trong MySQL.
-2. Chỉ dùng các dòng có `aqi` hợp lệ.
-3. Điền giá trị thiếu bằng `0` để mô hình có thể huấn luyện.
-4. Tách dữ liệu thành:
-
-```text
-X = PM2.5, PM10, CO, NO2, SO2, O3
-y = AQI
-```
-
-5. Huấn luyện mô hình `LinearRegression`.
-6. Nếu người dùng truyền tên thành phố, hệ thống lấy bản ghi mới nhất của thành phố đó làm đầu vào.
-7. Mô hình trả về AQI dự đoán.
-
-Ví dụ:
-
-```text
-GET /predict?city=Hanoi
-```
-
-Endpoint này lấy dữ liệu mới nhất của Hà Nội trong MySQL, đưa các chỉ số ô nhiễm vào mô hình và trả về:
-
-```json
-{
-  "predicted_aqi": 75.23
-}
-```
-
-Phần dự đoán này có ý nghĩa tham khảo, giúp minh họa cách sử dụng học máy trên dữ liệu môi trường. Độ chính xác phụ thuộc vào số lượng và chất lượng dữ liệu đã crawl. Nếu dữ liệu quá ít, hệ thống sẽ báo chưa đủ dữ liệu để huấn luyện.
-
-Tóm lại:
-
-| Mô hình | Loại bài toán | Mục đích |
-|---|---|---|
-| KMeans | Không giám sát | Phân nhóm thành phố theo đặc điểm ô nhiễm |
-| Linear Regression | Có giám sát | Dự đoán AQI từ các chất ô nhiễm |
-
-## 14. Auto crawl
-
-Mặc định:
-
-```text
-AUTO_CRAWL_ENABLED=true
-AUTO_CRAWL_INTERVAL_SECONDS=900
-AUTO_CRAWL_TARGET=1500
-```
-
-Vì Open-Meteo là dữ liệu theo giờ, nên khi chạy thật nên dùng chu kỳ 1 giờ:
-
-```text
-GET /auto-start?interval_seconds=3600
-```
-
-Tắt auto crawl:
-
-```text
-GET /auto-stop
-```
-
-Chạy một lần:
-
-```text
-GET /auto-once
-```
-
-## 15. Frontend dashboard
-
-File:
-
-```text
-index.html
-```
-
-Dashboard gọi API tại:
-
-```text
-http://127.0.0.1:8000
-```
-
-Chức năng giao diện:
-
-- Nút thu thập dữ liệu mới.
-- Hiển thị AQI cao nhất hiện tại.
-- Dự đoán AQI.
-- Số thành phố có dữ liệu.
-- Thành phố có AQI thấp nhất.
-- Biểu đồ AQI theo thời gian.
-- Bảng xếp hạng AQI.
-- So sánh hai thành phố.
-- Tổng hợp chất lượng không khí.
-- Phân nhóm ô nhiễm bằng KMeans.
-- Bản đồ AQI.
-
-Chạy giao diện:
+Có thể mở trực tiếp `index.html` trong trình duyệt. Nếu muốn chạy bằng local static server:
 
 ```bash
 python -m http.server 5500
@@ -801,61 +142,117 @@ Mở:
 http://127.0.0.1:5500/index.html
 ```
 
-## 16. Cài đặt và chạy hệ thống
+## Crawl dữ liệu
 
-### 16.1. Cài thư viện
-
-```bash
-pip install -r requirements.txt
-```
-
-### 16.2. Tạo database MySQL
-
-Trong MySQL Workbench:
-
-```sql
-CREATE DATABASE air_quality CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-```
-
-Nếu bảng chưa tồn tại, backend sẽ tự tạo. Nếu bảng cũ thiếu cột:
-
-```sql
-ALTER TABLE air_quality.air_quality
-ADD COLUMN country VARCHAR(100) DEFAULT 'Vietnam';
-
-ALTER TABLE air_quality.air_quality
-ADD COLUMN so2 FLOAT NULL;
-```
-
-### 16.3. Chạy backend
-
-Từ thư mục gốc:
-
-```bash
-uvicorn backend.main:app --reload
-```
-
-Hoặc từ thư mục `backend`:
-
-```bash
-uvicorn main:app --reload
-```
-
-Kiểm tra:
+Trên dashboard bấm **Thu thập dữ liệu mới**, hoặc gọi:
 
 ```text
-http://127.0.0.1:8000/
+GET http://127.0.0.1:8000/crawl?target=1500&replace_existing=true&force=true
 ```
 
-### 16.4. Crawl dữ liệu
+Kết quả trả về có:
+
+- `raw_count`: số bản ghi lấy từ API.
+- `clean_count`: số bản ghi hợp lệ sau Pandas clean.
+- `inserted_count`: số bản ghi lưu vào MySQL.
+- `deleted_count`: số bản ghi hiện hành cũ bị xóa nếu `replace_existing=true`.
+- `archived_count`: số bản ghi được lưu vào bảng lịch sử.
+
+Với 108 thành phố/khu vực và khoảng 15-17 giờ dữ liệu mỗi nơi, một lần crawl thường đủ mục tiêu khoảng 1000-1500 bản ghi hợp lệ nếu Open-Meteo trả đủ dữ liệu.
+
+## Endpoint chính
+
+| Endpoint | Chức năng |
+|---|---|
+| `GET /` | Health check |
+| `GET /cities` | Danh sách thành phố/khu vực |
+| `GET /source-url?city=Hà Nội` | Link API Open-Meteo để đối chiếu |
+| `GET /crawl?target=1500&replace_existing=true` | Crawl, clean, store |
+| `GET /summary` | Tổng quan dashboard |
+| `GET /search?...` | Tìm kiếm nâng cao |
+| `GET /ranking?...` | Xếp hạng thành phố |
+| `GET /compare?city1=...&city2=...` | So sánh bản ghi mới nhất |
+| `GET /compare-history?city1=...&city2=...` | So sánh lịch sử và AQI trung bình |
+| `GET /map` | Dữ liệu marker Leaflet |
+| `GET /chart?city=...` | AQI theo thời gian của một thành phố |
+| `GET /chart_multi` | AQI theo thời gian của nhiều thành phố |
+| `GET /cluster` | KMeans |
+| `GET /predict?city=...` | Dự đoán AQI tham khảo |
+| `GET /city-insight?city=...` | Latest, history, cluster, prediction và nhận xét |
+
+Ví dụ tìm kiếm nâng cao:
 
 ```text
-http://127.0.0.1:8000/crawl?target=1500&replace_existing=true
+GET /search?city=Hà Nội&start_date=2026-05-01&end_date=2026-05-14&sort_by=aqi&order=desc&limit=50
 ```
 
-## 17. Kiểm tra dữ liệu trong MySQL
+Tham số `/search` hỗ trợ:
 
-Tổng số dòng:
+```text
+city, country, start_date, end_date,
+min_aqi, max_aqi,
+level=good|moderate|unhealthy|very_unhealthy|hazardous,
+pollutant=aqi|pm25|pm10|co|no2|so2|o3,
+sort_by=time|aqi|pm25|pm10|co|no2|so2|o3,
+order=asc|desc,
+limit
+```
+
+Ví dụ ranking:
+
+```text
+GET /ranking?metric=aqi&order=desc&limit=10
+GET /ranking?metric=aqi&order=asc&limit=10
+GET /ranking?metric=pm25&order=desc&limit=10
+GET /ranking?metric=pm10&order=desc&limit=10
+GET /ranking?metric=pollution_score&order=desc&limit=10
+```
+
+Điểm ô nhiễm tổng hợp:
+
+```text
+pollution_score = aqi * 0.5 + pm25 * 0.2 + pm10 * 0.15 + no2 * 0.05 + so2 * 0.05 + o3 * 0.05
+```
+
+Nếu thiếu chỉ số, hệ thống chỉ tính trên các giá trị có sẵn và chuẩn hóa lại theo tổng trọng số có sẵn. Cách này tránh coi dữ liệu thiếu là 0.
+
+## Học máy
+
+### KMeans
+
+File: `backend/services/ml.py`
+
+- Feature: `pm25`, `pm10`, `co`, `no2`, `so2`, `o3`.
+- Dữ liệu đầu vào là bản ghi mới nhất theo từng thành phố.
+- Thiếu feature được điền bằng median của cột chỉ trong bước huấn luyện.
+- Chuẩn hóa bằng `StandardScaler`.
+- Chạy `KMeans(n_clusters=3, random_state=42, n_init=10)`.
+- Gán nhãn cụm theo AQI trung bình: `low`, `medium`, `high`.
+- Trả `silhouette_score` nếu đủ dữ liệu.
+
+KMeans là phân nhóm tương đối theo dữ liệu đang có, không phải phân loại AQI chính thức.
+
+### Linear Regression
+
+File: `backend/services/predict.py`
+
+- Feature: `pm25`, `pm10`, `co`, `no2`, `so2`, `o3`.
+- Target: `aqi`.
+- Trả `predicted_aqi`, `training_records`, `mae`, `r2` nếu có thể.
+- Nếu dữ liệu quá ít, trả message rõ ràng và `predicted_aqi = null`.
+- Kết quả dự đoán chỉ là tham khảo, không phải AQI chính thức.
+
+Endpoint tích hợp:
+
+```text
+GET /city-insight?city=Hà Nội
+```
+
+Trả dữ liệu mới nhất, lịch sử gần đây, cluster level, AQI dự đoán và nhận xét ngắn.
+
+## Kiểm tra dữ liệu trong MySQL
+
+Tổng số bản ghi:
 
 ```sql
 SELECT COUNT(*) AS total
@@ -865,39 +262,19 @@ FROM air_quality.air_quality;
 Xem dữ liệu mới nhất:
 
 ```sql
-SELECT city, time, pm25, pm10, co, no2, so2, o3, aqi, station
+SELECT city, country, observed_time, collected_at,
+       pm25, pm10, co, no2, so2, o3, aqi, station
 FROM air_quality.air_quality
-ORDER BY time DESC
+ORDER BY observed_time DESC
 LIMIT 20;
 ```
 
-Kiểm tra nguồn dữ liệu:
-
-```sql
-SELECT station, COUNT(*) AS total
-FROM air_quality.air_quality
-GROUP BY station;
-```
-
-Kết quả đúng của luồng chính:
-
-```text
-open_meteo
-open_meteo_hourly
-```
-
-Kiểm tra có lưu nhầm dữ liệu tương lai không:
+Kiểm tra không lưu dữ liệu tương lai:
 
 ```sql
 SELECT COUNT(*) AS future_rows
 FROM air_quality.air_quality
-WHERE time > NOW();
-```
-
-Kết quả nên là:
-
-```text
-0
+WHERE observed_time > NOW();
 ```
 
 Kiểm tra AQI hợp lệ:
@@ -905,95 +282,57 @@ Kiểm tra AQI hợp lệ:
 ```sql
 SELECT COUNT(*) AS invalid_aqi
 FROM air_quality.air_quality
-WHERE aqi < 0 OR aqi > 500 OR aqi IS NULL;
+WHERE aqi IS NULL OR aqi < 0 OR aqi > 500;
 ```
 
-Kết quả nên là:
-
-```text
-0
-```
-
-Kiểm tra dữ liệu theo thành phố:
+Kiểm tra trùng:
 
 ```sql
-SELECT city, MAX(time) AS latest_time, COUNT(*) AS total
+SELECT city, observed_time, station, COUNT(*) AS total
 FROM air_quality.air_quality
-GROUP BY city
-ORDER BY latest_time DESC;
+GROUP BY city, observed_time, station
+HAVING COUNT(*) > 1;
 ```
 
-Đối chiếu trực tiếp với Open-Meteo, ví dụ Hà Nội:
-
-```text
-https://air-quality-api.open-meteo.com/v1/air-quality?latitude=21.03&longitude=105.85&current=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi&timezone=Asia/Ho_Chi_Minh
-```
-
-Sau đó kiểm tra MySQL:
+Kiểm tra nguồn:
 
 ```sql
-SELECT city, time, pm25, pm10, co, no2, so2, o3, aqi, station
+SELECT station, COUNT(*) AS total
 FROM air_quality.air_quality
-WHERE city LIKE '%Hà Nội%' OR city LIKE '%Ha Noi%' OR city LIKE '%Hanoi%'
-ORDER BY time DESC
-LIMIT 10;
+GROUP BY station;
 ```
 
-### 17.1. Vì sao giao diện có dấu `--`?
-
-Open-Meteo có thể trả đủ hoặc thiếu một vài chỉ số ô nhiễm tùy vị trí và thời điểm. Nếu một chỉ số bị thiếu mà hệ thống hiển thị thành `0`, người xem có thể hiểu nhầm rằng nồng độ chất đó thật sự bằng 0. Điều này làm dữ liệu trông không uy tín.
-
-Phiên bản hiện tại xử lý theo nguyên tắc:
-
-- Nếu API có dữ liệu thật: hiển thị số.
-- Nếu API thiếu dữ liệu: hiển thị `--`.
-- Không biến dữ liệu thiếu thành số 0 trên dashboard.
-- Khi so sánh hai thành phố, chỉ tính chênh lệch nếu cả hai bên đều có số liệu thật.
-
-Backend cũng trả thêm trường đánh giá chất lượng dữ liệu:
-
-| Trường | Ý nghĩa |
-|---|---|
-| `quality = complete` | Có đủ PM2.5, PM10, CO, NO2, SO2, O3 |
-| `quality = partial` | Thiếu một vài chỉ số ô nhiễm |
-| `quality = aqi_only` | Chỉ có AQI, không có chi tiết chất ô nhiễm |
-
-Nhờ vậy, dashboard minh bạch hơn: số 0 chỉ xuất hiện khi API thật sự trả về 0, còn dữ liệu thiếu được hiển thị là `--`.
-
-Nếu database đã có dữ liệu cũ từng bị lưu số 0 cho chỉ số thiếu, có thể gọi endpoint bảo trì:
+Kết quả thường gồm:
 
 ```text
-POST http://127.0.0.1:8000/maintenance/nullify-zero-pollutants
+open_meteo
+open_meteo_hourly
 ```
 
-Endpoint này chuyển các giá trị pollutant bằng `0` đáng ngờ về `NULL`, để dashboard hiển thị `--` thay vì số 0 giả.
+## Hạn chế
 
-## 18. Checklist chức năng
+- Open-Meteo có thể thiếu một vài chất ô nhiễm tùy tọa độ và thời điểm.
+- AQI dùng `us_aqi` của Open-Meteo, không tự suy diễn AQI nếu API thiếu.
+- Mô hình ML đơn giản, phù hợp minh họa kỹ thuật hơn là dự báo sản xuất.
+- KMeans phụ thuộc dữ liệu mới nhất trong MySQL, nên kết quả thay đổi sau mỗi lần crawl.
+- Dashboard hiện là HTML/CSS/JavaScript thuần, chưa có authentication.
 
-| Chức năng | Trạng thái | Ghi chú |
-|---|---|---|
-| Crawl Open-Meteo | Có | Nguồn duy nhất |
-| Không dùng dataset sẵn | Có | Không dùng CSV/Kaggle |
-| Tiền xử lý Pandas | Có | Clean, validate, deduplicate |
-| Lưu MySQL | Có | SQLAlchemy ORM |
-| Chống trùng | Có | `city + time + station` |
-| Xếp hạng AQI | Có | Theo bản ghi mới nhất từng thành phố |
-| Bản đồ AQI | Có | Leaflet |
-| Biểu đồ AQI | Có | Chart.js |
-| Tìm kiếm | Có | Hỗ trợ alias city |
-| So sánh | Có | AQI và các chất ô nhiễm |
-| Summary | Có | Trung bình và top tốt/xấu |
-| KMeans | Có | Phân nhóm tương đối |
-| Predict | Có | Linear Regression |
-| Auto crawl | Có | Theo chu kỳ |
-| Compliance | Có | Mô tả nguồn và pipeline |
+## Hướng phát triển
 
-## 19. Kết luận
+- Thêm lịch crawl bằng scheduler riêng.
+- Lưu lịch sử lâu dài và thêm biểu đồ theo ngày/tuần/tháng.
+- Thêm endpoint export CSV từ dữ liệu đã crawl.
+- Thử thêm Random Forest/XGBoost để so sánh với Linear Regression.
+- Thêm test tự động cho DataLoader, crawler parser và API filter.
 
-Hệ thống đã hoàn thiện pipeline thu thập và phân tích dữ liệu chất lượng không khí theo đúng yêu cầu:
+## Dọn project trước khi nộp
 
-```text
-Thu thập bằng API -> Tiền xử lý bằng Pandas -> Lưu vào MySQL -> Truy vấn/hiển thị/phân tích
-```
+Đã thêm `.gitignore` để loại:
 
-Dự án sử dụng Open-Meteo Air Quality API làm nguồn duy nhất, không dùng dataset có sẵn và không scrape HTML. Dữ liệu sau khi thu thập được chuẩn hóa, kiểm tra hợp lệ và lưu vào MySQL. Trên dữ liệu đã lưu, hệ thống cung cấp các chức năng xếp hạng, bản đồ, biểu đồ, tìm kiếm, so sánh, phân nhóm ô nhiễm bằng KMeans và dự đoán AQI bằng Linear Regression.
+- `.env`
+- `__pycache__/`
+- `*.pyc`
+- virtual environment
+- cache/test/build output
+
+Không nộp mật khẩu thật, token thật hoặc thư mục `.git` nếu giảng viên không yêu cầu.

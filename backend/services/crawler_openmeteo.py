@@ -10,9 +10,11 @@ API: https://open-meteo.com/en/docs/air-quality-api
 
 import logging
 import math
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Dict, List, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -35,14 +37,21 @@ AIR_QUALITY_PARAMS = {
     "us_aqi": "aqi",  # Use US AQI as our main AQI
 }
 
-REQUEST_TIMEOUT = 10
-MAX_WORKERS = 16
+REQUEST_TIMEOUT = int(os.getenv("OPEN_METEO_TIMEOUT_SECONDS", "15"))
+MAX_WORKERS = int(os.getenv("OPEN_METEO_MAX_WORKERS", "6"))
 RETRY_TOTAL = 3
 RETRY_BACKOFF = 0.6
+REQUEST_DELAY_SECONDS = float(os.getenv("OPEN_METEO_REQUEST_DELAY_SECONDS", "0.05"))
 
 
 def build_session():
     session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": "AirQualityStudentProject/1.0 (Open-Meteo API client)",
+            "Accept": "application/json",
+        }
+    )
     retry = Retry(
         total=RETRY_TOTAL,
         connect=RETRY_TOTAL,
@@ -126,6 +135,9 @@ def fetch_open_meteo_data(city: Dict, hourly_limit: int = 12) -> List[Dict]:
             "forecast_days": 1,
         }
         
+        if REQUEST_DELAY_SECONDS > 0:
+            time.sleep(REQUEST_DELAY_SECONDS)
+
         response = HTTP_SESSION.get(
             OPEN_METEO_URL,
             params=params,
@@ -137,15 +149,21 @@ def fetch_open_meteo_data(city: Dict, hourly_limit: int = 12) -> List[Dict]:
         records = []
         
         current_time = None
+        collected_at = datetime.now().replace(microsecond=0)
+        now_local = collected_at
 
         # Current data (most recent)
         if "current" in data:
             current = data["current"]
-            current_time = parse_openmeteo_time(current.get("time")) or datetime.now().replace(microsecond=0)
+            current_time = parse_openmeteo_time(current.get("time")) or collected_at
             record = {
                 "city": city["name"],
                 "country": city["country"],
+                "latitude": city["lat"],
+                "longitude": city["lon"],
                 "time": current_time,
+                "observed_time": current_time,
+                "collected_at": collected_at,
                 "station": "open_meteo",
                 "aqi": safe_float(current.get("us_aqi")),
                 "pm25": safe_float(current.get("pm2_5")),
@@ -156,7 +174,7 @@ def fetch_open_meteo_data(city: Dict, hourly_limit: int = 12) -> List[Dict]:
                 "o3": safe_float(current.get("ozone")),
             }
             
-            if record["aqi"] is not None and 0 <= record["aqi"] <= 500:
+            if current_time <= now_local and record["aqi"] is not None and 0 <= record["aqi"] <= 500:
                 records.append(record)
                 logger.debug(f"[OPEN-METEO] {city['name']}: AQI {record['aqi']}")
         
@@ -174,7 +192,6 @@ def fetch_open_meteo_data(city: Dict, hourly_limit: int = 12) -> List[Dict]:
             # Only store hourly values that have already happened. Open-Meteo can
             # return forecast hours; those are useful, but this project stores
             # collected/current facts rather than future predictions.
-            now_local = datetime.now().replace(microsecond=0)
             valid_indexes = []
             for i, value in enumerate(times):
                 time_val = parse_openmeteo_time(value)
@@ -192,7 +209,11 @@ def fetch_open_meteo_data(city: Dict, hourly_limit: int = 12) -> List[Dict]:
                     record = {
                         "city": city["name"],
                         "country": city["country"],
+                        "latitude": city["lat"],
+                        "longitude": city["lon"],
                         "time": time_val,
+                        "observed_time": time_val,
+                        "collected_at": collected_at,
                         "station": "open_meteo_hourly",
                         "aqi": aqi,
                         "pm25": pm25,
