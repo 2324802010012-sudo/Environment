@@ -1,12 +1,13 @@
 from types import SimpleNamespace
+from datetime import datetime, timedelta
 from sqlalchemy import asc, desc, func, or_, tuple_
 from sqlalchemy.exc import IntegrityError
 
 try:
-    from .models import AirQuality
+    from .models import AirQuality, AirQualityHistory
     from .services.cities import canonical_city_name, city_search_terms
 except ImportError:
-    from models import AirQuality
+    from models import AirQuality, AirQualityHistory
     from services.cities import canonical_city_name, city_search_terms
 import math
 
@@ -18,6 +19,57 @@ def clean(x):
 def _city_filter(city):
     terms = city_search_terms(city)
     return or_(*[AirQuality.city.ilike(f"%{term}%") for term in terms])
+
+
+def clear_data(db):
+    deleted = db.query(AirQuality).delete(synchronize_session=False)
+    db.flush()
+    return deleted
+
+
+def archive_data(db, records):
+    archived = 0
+    crawled_at = datetime.now().replace(microsecond=0)
+
+    for record in records:
+        aqi = record.get("aqi")
+        if aqi is None or aqi < 0 or aqi > 500:
+            continue
+
+        city = canonical_city_name(record.get("city", ""))
+        station = record.get("station") or "unknown"
+        exists = (
+            db.query(AirQualityHistory.id)
+            .filter(
+                AirQualityHistory.city == city,
+                AirQualityHistory.time == record.get("time"),
+                AirQualityHistory.station == station,
+            )
+            .first()
+        )
+        if exists:
+            continue
+
+        db.add(
+            AirQualityHistory(
+                city=city,
+                country=record.get("country", "Vietnam"),
+                time=record.get("time"),
+                crawled_at=crawled_at,
+                pm25=clean(record.get("pm25")),
+                pm10=clean(record.get("pm10")),
+                co=clean(record.get("co")),
+                no2=clean(record.get("no2")),
+                so2=clean(record.get("so2")),
+                o3=clean(record.get("o3")),
+                aqi=clean(record.get("aqi")),
+                station=station,
+            )
+        )
+        archived += 1
+
+    db.flush()
+    return archived
 
 
 def insert_data(db, records):
@@ -109,37 +161,75 @@ def _chunks(items, size):
         yield items[index:index + size]
 
 
-def get_unique_latest(db, limit=10, sort_desc=True):
-    subquery = (
-        db.query(
-            AirQuality.city.label("city"),
-            func.max(AirQuality.time).label("latest_time"),
-        )
-        .group_by(AirQuality.city)
-        .subquery()
+def _fresh_cutoff(max_age_hours):
+    if max_age_hours is None:
+        return None
+    return datetime.now() - timedelta(hours=max_age_hours)
+
+
+def _station_priority(row):
+    return 0 if row.station == "open_meteo" else 1
+
+
+def _dedupe_latest_rows(rows):
+    latest_by_city = {}
+    for row in rows:
+        city = canonical_city_name(row.city)
+        current = latest_by_city.get(city)
+        if current is None:
+            latest_by_city[city] = row
+            continue
+
+        current_key = (current.time, -_station_priority(current))
+        row_key = (row.time, -_station_priority(row))
+        if row_key > current_key:
+            latest_by_city[city] = row
+
+    return list(latest_by_city.values())
+
+
+def _dedupe_history_rows(rows):
+    best_by_time = {}
+    for row in rows:
+        key = (canonical_city_name(row.city), row.time)
+        current = best_by_time.get(key)
+        if current is None or _station_priority(row) < _station_priority(current):
+            best_by_time[key] = row
+
+    return sorted(best_by_time.values(), key=lambda row: row.time, reverse=True)
+
+
+def get_unique_latest(db, limit=10, sort_desc=True, max_age_hours=None):
+    query = db.query(AirQuality)
+
+    cutoff = _fresh_cutoff(max_age_hours)
+    if cutoff is not None:
+        query = query.filter(AirQuality.time >= cutoff)
+
+    rows = query.order_by(AirQuality.time.desc()).all()
+    latest_rows = _dedupe_latest_rows(rows)
+    latest_rows.sort(
+        key=lambda row: float(row.aqi or 0),
+        reverse=sort_desc,
     )
+    return latest_rows[:limit]
 
-    query = db.query(AirQuality).join(
-        subquery,
-        (AirQuality.city == subquery.c.city) &
-        (AirQuality.time == subquery.c.latest_time),
-    )
-
-    query = query.order_by(desc(AirQuality.aqi) if sort_desc else asc(AirQuality.aqi))
-    return query.limit(limit).all()
-
-def search_city_records(db, city, limit=50):
-    return (
+def search_city_records(db, city, limit=50, max_age_hours=None):
+    query = (
         db.query(AirQuality)
         .filter(_city_filter(city))
-        .order_by(AirQuality.time.desc())
-        .limit(limit)
-        .all()
     )
 
+    cutoff = _fresh_cutoff(max_age_hours)
+    if cutoff is not None:
+        query = query.filter(AirQuality.time >= cutoff)
 
-def get_city_history(db, city, limit=50):
-    return search_city_records(db, city, limit)
+    rows = query.order_by(AirQuality.time.desc()).limit(limit * 2).all()
+    return _dedupe_history_rows(rows)[:limit]
+
+
+def get_city_history(db, city, limit=50, max_age_hours=None):
+    return search_city_records(db, city, limit, max_age_hours=max_age_hours)
 
 
 def get_city_aggregate(db, city):
@@ -191,5 +281,10 @@ def get_all_city_averages(db):
     )
 
 
-def get_all_latest_by_city(db, limit=None, sort_desc=True):
-    return get_unique_latest(db, limit=limit or 100, sort_desc=sort_desc)
+def get_all_latest_by_city(db, limit=None, sort_desc=True, max_age_hours=None):
+    return get_unique_latest(
+        db,
+        limit=limit or 100,
+        sort_desc=sort_desc,
+        max_age_hours=max_age_hours,
+    )

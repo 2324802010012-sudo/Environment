@@ -15,6 +15,8 @@ from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .cities import CITY_PROFILES
 
@@ -35,6 +37,27 @@ AIR_QUALITY_PARAMS = {
 
 REQUEST_TIMEOUT = 10
 MAX_WORKERS = 16
+RETRY_TOTAL = 3
+RETRY_BACKOFF = 0.6
+
+
+def build_session():
+    session = requests.Session()
+    retry = Retry(
+        total=RETRY_TOTAL,
+        connect=RETRY_TOTAL,
+        read=RETRY_TOTAL,
+        backoff_factor=RETRY_BACKOFF,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("GET",),
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+HTTP_SESSION = build_session()
 
 
 def vietnam_openmeteo_cities() -> List[Dict]:
@@ -73,10 +96,7 @@ def parse_openmeteo_time(value) -> Optional[datetime]:
 
 
 def calculate_aqi_from_pollutants(pm25, pm10, co=None, no2=None, so2=None, o3=None) -> Optional[float]:
-    """
-    Calculate a simple AQI from pollutants if US AQI not available.
-    Uses EPA-style calculation.
-    """
+    """Deprecated fallback. The production crawler stores only Open-Meteo US AQI."""
     if pm25 is None:
         return None
     
@@ -99,12 +119,14 @@ def fetch_open_meteo_data(city: Dict, hourly_limit: int = 12) -> List[Dict]:
             "longitude": city["lon"],
             "current": "pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi",
             "hourly": "pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi",
-            "timezone": "auto",
+            # Keep every city in the same local timezone as the application.
+            # This makes freshness checks consistent for Vietnam and foreign cities.
+            "timezone": "Asia/Ho_Chi_Minh",
             "past_days": 2,
             "forecast_days": 1,
         }
         
-        response = requests.get(
+        response = HTTP_SESSION.get(
             OPEN_METEO_URL,
             params=params,
             timeout=REQUEST_TIMEOUT,
@@ -114,6 +136,8 @@ def fetch_open_meteo_data(city: Dict, hourly_limit: int = 12) -> List[Dict]:
         
         records = []
         
+        current_time = None
+
         # Current data (most recent)
         if "current" in data:
             current = data["current"]
@@ -131,13 +155,6 @@ def fetch_open_meteo_data(city: Dict, hourly_limit: int = 12) -> List[Dict]:
                 "so2": safe_float(current.get("sulphur_dioxide")),
                 "o3": safe_float(current.get("ozone")),
             }
-            
-            # If US AQI missing, calculate from pollutants
-            if record["aqi"] is None:
-                record["aqi"] = calculate_aqi_from_pollutants(
-                    record["pm25"], record["pm10"], record["co"],
-                    record["no2"], record["so2"], record["o3"]
-                )
             
             if record["aqi"] is not None and 0 <= record["aqi"] <= 500:
                 records.append(record)
@@ -165,18 +182,11 @@ def fetch_open_meteo_data(city: Dict, hourly_limit: int = 12) -> List[Dict]:
                     valid_indexes.append((i, time_val))
 
             for i, time_val in valid_indexes[-max(1, hourly_limit):]:
+                if current_time and time_val == current_time:
+                    continue
+
                 pm25 = safe_float(pm25_vals[i] if i < len(pm25_vals) else None)
                 aqi = safe_float(aqi_vals[i] if i < len(aqi_vals) else None)
-
-                if aqi is None:
-                    aqi = calculate_aqi_from_pollutants(
-                        pm25,
-                        safe_float(pm10_vals[i] if i < len(pm10_vals) else None),
-                        safe_float(co_vals[i] if i < len(co_vals) else None),
-                        safe_float(no2_vals[i] if i < len(no2_vals) else None),
-                        safe_float(so2_vals[i] if i < len(so2_vals) else None),
-                        safe_float(o3_vals[i] if i < len(o3_vals) else None),
-                    )
 
                 if aqi is not None and 0 <= aqi <= 500:
                     record = {
@@ -252,10 +262,6 @@ def fetch_data_openmeteo(
                     if verbose:
                         print(f"  {record['city']}: AQI={record['aqi']}")
                     
-                    if len(all_records) >= target_records:
-                        print(f"REACHED TARGET: {len(all_records)} records")
-                        return all_records
-                        
             except Exception as exc:
                 logger.error(f"Error processing {city['name']}: {exc}")
     

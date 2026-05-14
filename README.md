@@ -211,7 +211,7 @@ https://air-quality-api.open-meteo.com/v1/air-quality
 Ví dụ request cho Hà Nội:
 
 ```text
-https://air-quality-api.open-meteo.com/v1/air-quality?latitude=21.03&longitude=105.85&current=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi&hourly=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi&timezone=auto&past_days=2&forecast_days=1
+https://air-quality-api.open-meteo.com/v1/air-quality?latitude=21.03&longitude=105.85&current=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi&hourly=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi&timezone=Asia/Ho_Chi_Minh&past_days=2&forecast_days=1
 ```
 
 ### 7.2. Tham số request
@@ -222,7 +222,7 @@ https://air-quality-api.open-meteo.com/v1/air-quality?latitude=21.03&longitude=1
 | `longitude` | Kinh độ địa điểm |
 | `current` | Lấy dữ liệu hiện tại |
 | `hourly` | Lấy dữ liệu theo giờ |
-| `timezone=auto` | Dùng múi giờ tự động theo tọa độ |
+| `timezone=Asia/Ho_Chi_Minh` | Đồng bộ thời gian API theo múi giờ Việt Nam để lọc dữ liệu hiện hành ổn định |
 | `past_days=2` | Lấy dữ liệu gần đây |
 | `forecast_days=1` | API có thể trả thêm mốc dự báo, nhưng hệ thống không lưu mốc tương lai |
 
@@ -265,14 +265,16 @@ Mỗi bản ghi raw được chuẩn hóa về dạng:
 Endpoint:
 
 ```text
-GET /crawl?target=1500
+GET /crawl?target=1500&replace_existing=true
 ```
 
-nghĩa là hệ thống cố gắng lấy khoảng 1500 bản ghi raw từ Open-Meteo. Tuy nhiên số dòng mới lưu vào MySQL có thể thấp hơn vì:
+nghĩa là hệ thống cố gắng lấy khoảng 1500 bản ghi raw từ Open-Meteo. Mặc định `replace_existing=true`, nên mỗi lần crawl thành công sẽ refresh bảng dữ liệu:
 
-- Dữ liệu có thể bị trùng `city + time + station`.
-- Open-Meteo cập nhật dữ liệu theo mốc giờ.
-- Nếu crawl liên tục trong vài phút, timestamp thường chưa đổi.
+- Chỉ xóa dữ liệu cũ sau khi đã lấy và clean được dữ liệu mới hợp lệ.
+- Xóa các bản ghi cũ trong bảng `air_quality`.
+- Lưu bộ dữ liệu mới vừa lấy từ Open-Meteo.
+- Nếu API lỗi hoặc không có dữ liệu hợp lệ, dữ liệu cũ vẫn được giữ lại.
+- Nếu muốn giữ dữ liệu cũ và chỉ insert thêm, gọi `GET /crawl?target=1500&replace_existing=false`.
 
 Cần phân biệt:
 
@@ -280,9 +282,11 @@ Cần phân biệt:
 |---|---|
 | `raw_count` | Số bản ghi lấy từ API |
 | `clean_count` | Số bản ghi hợp lệ sau tiền xử lý |
-| `inserted_count` | Số bản ghi mới thật sự lưu vào MySQL |
+| `deleted_count` | Số bản ghi cũ đã xóa trước khi lưu dữ liệu mới |
+| `inserted_count` | Số bản ghi mới lưu vào MySQL |
+| `replace_existing` | Cho biết lần crawl có thay thế toàn bộ dữ liệu cũ hay không |
 
-Ví dụ `inserted_count = 0` không có nghĩa là crawl sai. Nó thường chỉ cho biết dữ liệu đã tồn tại trong MySQL.
+Với chế độ mặc định, `inserted_count` là số bản ghi của bộ dữ liệu mới sau khi đã refresh bảng.
 
 Khuyến nghị: crawl khoảng **1 giờ/lần**, phù hợp với dữ liệu hourly.
 
@@ -393,19 +397,20 @@ http://127.0.0.1:8000/docs
 | `GET /` | Kiểm tra server |
 | `GET /compliance` | Mô tả nguồn dữ liệu và pipeline |
 | `GET /cities` | Danh sách 108 địa điểm theo dõi |
-| `GET /crawl?target=1500` | Crawl Open-Meteo, clean và lưu MySQL |
+| `GET /source-url?city=Hanoi` | Trả link Open-Meteo API gốc để đối chiếu dữ liệu |
+| `GET /crawl?target=1500&replace_existing=true` | Crawl Open-Meteo, clean, xóa dữ liệu cũ và lưu dữ liệu mới |
 | `GET /crawl-openmeteo?target=1500` | Crawl riêng Open-Meteo |
-| `GET /ranking?limit=10&order=desc` | Xếp hạng AQI |
-| `GET /map` | Dữ liệu bản đồ |
-| `GET /summary` | Tổng hợp dữ liệu mới nhất |
-| `GET /city?city=Hanoi` | Lịch sử một thành phố |
-| `GET /search?city=Hanoi` | Tìm kiếm thành phố |
-| `GET /compare?city1=Hanoi&city2=Da Nang` | So sánh hai thành phố |
-| `GET /chart?city=Hanoi` | Dữ liệu biểu đồ một thành phố |
-| `GET /chart_multi` | Dữ liệu biểu đồ nhiều thành phố |
-| `GET /cluster` | Phân nhóm ô nhiễm bằng KMeans |
-| `GET /predict` | Dự đoán AQI |
-| `GET /predict?city=Hanoi` | Dự đoán AQI cho một thành phố |
+| `GET /ranking?limit=10&order=desc&max_age_hours=48` | Xếp hạng AQI theo dữ liệu còn mới |
+| `GET /map?max_age_hours=48` | Dữ liệu bản đồ theo dữ liệu còn mới |
+| `GET /summary?max_age_hours=48` | Tổng hợp dữ liệu hiện hành |
+| `GET /city?city=Hanoi&max_age_hours=48` | Lịch sử gần đây của một thành phố |
+| `GET /search?city=Hanoi&max_age_hours=48` | Tìm kiếm thành phố trong dữ liệu gần đây |
+| `GET /compare?city1=Hanoi&city2=Da Nang&max_age_hours=48` | So sánh hai thành phố bằng dữ liệu còn mới |
+| `GET /chart?city=Hanoi&max_age_hours=48` | Dữ liệu biểu đồ gần đây của một thành phố |
+| `GET /chart_multi?max_age_hours=48` | Dữ liệu biểu đồ gần đây của nhiều thành phố |
+| `GET /cluster?max_age_hours=48` | Phân nhóm ô nhiễm bằng KMeans trên dữ liệu hiện hành |
+| `GET /predict?max_age_hours=48` | Dự đoán AQI |
+| `GET /predict?city=Hanoi&max_age_hours=48` | Dự đoán AQI cho một thành phố bằng input mới |
 | `GET /auto-status` | Trạng thái auto crawl |
 | `GET /auto-start?interval_seconds=3600` | Bật auto crawl |
 | `GET /auto-stop` | Tắt auto crawl |
@@ -418,22 +423,23 @@ http://127.0.0.1:8000/docs
 Endpoint:
 
 ```text
-GET /ranking?limit=10&order=desc
+GET /ranking?limit=10&order=desc&max_age_hours=48
 ```
 
 Logic:
 
-1. Lấy bản ghi mới nhất của từng thành phố trong MySQL.
-2. Chuẩn hóa tên thành phố.
-3. Loại thành phố trùng trong response.
-4. Sắp xếp theo AQI.
+1. Chỉ lấy các bản ghi nằm trong cửa sổ dữ liệu mới, mặc định `max_age_hours=48`.
+2. Trong nhóm dữ liệu còn mới, lấy bản ghi mới nhất của từng thành phố trong MySQL.
+3. Chuẩn hóa tên thành phố.
+4. Loại thành phố trùng trong response.
+5. Sắp xếp theo AQI.
 
 Ý nghĩa:
 
 - `order=desc`: AQI cao nhất đứng đầu, tức ô nhiễm nặng hơn.
 - `order=asc`: AQI thấp nhất đứng đầu, tức không khí tốt hơn.
 
-Hệ thống không còn lọc cứng “2 giờ gần nhất”, vì Open-Meteo có thể trả mốc giờ lệch. Dùng bản ghi mới nhất của từng thành phố giúp bảng xếp hạng ổn định hơn.
+Hệ thống mặc định dùng `max_age_hours=48` để tránh lỗi so sánh dữ liệu mới với dữ liệu cũ. Nếu một thành phố không có dữ liệu trong 48 giờ gần nhất, thành phố đó không được đưa vào bảng xếp hạng hiện hành. Có thể tăng tham số này, ví dụ `max_age_hours=168`, khi muốn xem dữ liệu trong 7 ngày gần nhất.
 
 ### 11.2. Bản đồ
 
@@ -445,9 +451,52 @@ GET /map
 
 Logic:
 
-- Lấy dữ liệu AQI mới nhất theo thành phố.
+- Lấy dữ liệu AQI mới nhất theo thành phố trong cửa sổ dữ liệu còn mới, mặc định 48 giờ.
 - Ghép với tọa độ trong `CITY_PROFILES`.
 - Frontend dùng Leaflet để vẽ marker trên bản đồ.
+- Thành phố không có dữ liệu mới vẫn có marker nhưng được đánh dấu không có dữ liệu hiện hành.
+
+### 11.2.1. Quy tắc dữ liệu hiện hành
+
+Các chức năng `ranking`, `map`, `summary`, `city`, `search`, `compare`, `chart`, `chart_multi`, `cluster` và `predict` đều dùng tham số `max_age_hours`, mặc định là `48`.
+
+Ý nghĩa:
+
+- Chỉ dùng dữ liệu có thời gian đo nằm trong 48 giờ gần nhất.
+- Không trộn bản ghi cũ với bản ghi mới khi xếp hạng hoặc so sánh.
+- Nếu Open-Meteo chưa có dữ liệu mới cho một địa điểm, hệ thống không giả lập số liệu mà trả về thiếu dữ liệu.
+- Có thể thay đổi bằng biến môi trường `CURRENT_DATA_MAX_AGE_HOURS` hoặc truyền trực tiếp query param `max_age_hours`.
+
+Ví dụ:
+
+```text
+GET /ranking?limit=10&order=desc&max_age_hours=48
+GET /summary?max_age_hours=48
+GET /compare?city1=Hà Nội&city2=Đà Nẵng&max_age_hours=48
+```
+
+### 11.2.2. Quy tắc chống sai lệch dữ liệu thực tế
+
+Để dữ liệu hiển thị không bị sai logic thực tế, hệ thống áp dụng thêm các nguyên tắc sau:
+
+- Crawler luôn quét hết danh sách thành phố thay vì dừng ngay khi vừa đủ `target_records`. Điều này tránh tình trạng dữ liệu bị lệch về các thành phố phản hồi API nhanh hơn.
+- AQI được lấy trực tiếp từ `us_aqi` của Open-Meteo. Nếu API thiếu AQI, bản ghi đó bị loại, không tự tạo AQI giả bằng công thức nội bộ.
+- Nếu bản ghi `current` và `hourly` trùng cùng thành phố và cùng mốc giờ, hệ thống ưu tiên bản ghi `current`.
+- Khi truy vấn dữ liệu mới nhất, hệ thống gộp trùng theo thành phố và ưu tiên `open_meteo` hơn `open_meteo_hourly`.
+- Bản đồ không tô màu xanh cho thành phố thiếu dữ liệu mới; các điểm thiếu dữ liệu được hiển thị màu xám.
+- KMeans phân nhóm theo bản ghi hiện hành mới nhất của từng thành phố trong cửa sổ `max_age_hours`, không lấy trung bình toàn bộ lịch sử cũ.
+
+### 11.2.3. Nguồn đối chiếu khi demo
+
+Hệ thống có endpoint:
+
+```text
+GET /source-url?city=Hanoi
+```
+
+Endpoint này không lưu thêm dữ liệu và không thay đổi pipeline chính. Nó chỉ trả về link Open-Meteo Air Quality API tương ứng với tọa độ thành phố đang chọn. Khi demo, có thể bấm nút **Mở nguồn** trên giao diện để mở trực tiếp dữ liệu gốc từ Open-Meteo và đối chiếu với dữ liệu đang hiển thị trong hệ thống.
+
+Lưu ý: đây là nguồn đối chiếu cùng hệ với nguồn chính Open-Meteo, không phải nguồn phụ để trộn dữ liệu vào MySQL. Cách này giúp demo minh bạch mà vẫn giữ logic dữ liệu nhất quán.
 
 ### 11.3. Tóm tắt
 
@@ -801,7 +850,7 @@ http://127.0.0.1:8000/
 ### 16.4. Crawl dữ liệu
 
 ```text
-http://127.0.0.1:8000/crawl?target=1500
+http://127.0.0.1:8000/crawl?target=1500&replace_existing=true
 ```
 
 ## 17. Kiểm tra dữ liệu trong MySQL
@@ -877,7 +926,7 @@ ORDER BY latest_time DESC;
 Đối chiếu trực tiếp với Open-Meteo, ví dụ Hà Nội:
 
 ```text
-https://air-quality-api.open-meteo.com/v1/air-quality?latitude=21.03&longitude=105.85&current=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi&timezone=auto
+https://air-quality-api.open-meteo.com/v1/air-quality?latitude=21.03&longitude=105.85&current=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi&timezone=Asia/Ho_Chi_Minh
 ```
 
 Sau đó kiểm tra MySQL:
